@@ -274,7 +274,7 @@ export default function Home() {
         <div>
           <p className="brand">PULSELAB · v2</p>
           <p className="sub">
-            {deviceName || "Whoop 5 lokalnie"}
+            {deviceName || "Recovery · Strain · Sleep"}
             {battery != null ? ` · ${battery}%` : ""}
             {status === "live" ? " · LIVE" : ""}
           </p>

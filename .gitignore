@@ -10,7 +10,4 @@ __pycache__/
 data_log.csv
 *.decoded.csv
 .DS_Store
-web/_deploy*.json
-web/_parts/
-web/_files_only.json
-web/_mcp_deploy_args.json
+.vercel_mcp_args.json
