@@ -2,22 +2,29 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScoreRing, recoveryColor, useSparkPath } from "../components/ScoreRing";
+import { DayChart } from "../components/DayChart";
+import { CalendarView } from "../components/CalendarView";
+import { ActivitiesView } from "../components/ActivitiesView";
 import { computeRecovery, emptyBaseline, updateBaseline } from "../lib/metrics/recovery";
 import { estimateRestingHr, computeSleepPerformance } from "../lib/metrics/sleep";
 import { computeStrain } from "../lib/metrics/strain";
+import { stressSeries, averageStress, hrSeries } from "../lib/metrics/stress";
 import { Profile, HrSample, localDateKey } from "../lib/metrics/types";
 import {
   appendSample,
-  exportCsv,
+  loadActivities,
   loadBaseline,
   loadDaySamples,
   loadProfile,
   loadRecentSamples,
   saveBaseline,
+  saveDaySummary,
   saveProfile,
 } from "../lib/store";
 import { CMD, UUID } from "../lib/whoop";
 import { createHistorySync, type SyncProgress } from "../lib/whoopSync";
+
+type Tab = "today" | "calendar" | "activities";
 
 function parseHrPacket(data: DataView): { bpm: number; rrMs: number[] } | null {
   if (data.byteLength < 2) return null;
@@ -42,20 +49,20 @@ function parseHrPacket(data: DataView): { bpm: number; rrMs: number[] } | null {
   return { bpm, rrMs };
 }
 
-function parseHexLine(line: string): Uint8Array | null {
-  const tokens = line.match(/[0-9a-fA-F]{2}/g);
-  if (!tokens || tokens.length < 2) return null;
-  return new Uint8Array(tokens.map((t) => parseInt(t, 16)));
+function dayStartMs(dateKey: string): number {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
 }
 
 export default function Home() {
+  const [tab, setTab] = useState<Tab>("today");
+  const [selectedDate, setSelectedDate] = useState(localDateKey());
   const [status, setStatus] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [deviceName, setDeviceName] = useState("");
   const [bpm, setBpm] = useState<number | null>(null);
   const [battery, setBattery] = useState<number | null>(null);
   const [hrSpark, setHrSpark] = useState<number[]>([]);
   const [error, setError] = useState("");
-  const [paste, setPaste] = useState("");
   const [bleOk, setBleOk] = useState(false);
   const [iosHint, setIosHint] = useState(false);
   const [profile, setProfile] = useState<Profile>({ age: 30, sex: "u" });
@@ -69,9 +76,8 @@ export default function Home() {
   const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
   const path = useSparkPath(hrSpark, 140, 40);
 
-  const recompute = useCallback(() => {
-    setTick((t) => t + 1);
-  }, []);
+  const isToday = selectedDate === localDateKey();
+  const recompute = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
     setBleOk(typeof navigator !== "undefined" && "bluetooth" in navigator);
@@ -80,38 +86,61 @@ export default function Home() {
   }, []);
 
   const metrics = useMemo(() => {
-    const today = loadDaySamples();
-    const recent = loadRecentSamples(2);
+    const daySamples = loadDaySamples(selectedDate);
+    const recent = isToday ? loadRecentSamples(2) : daySamples;
     const rhr = estimateRestingHr(recent, profile.restingHrHint ?? 58);
-    const strain = computeStrain(today, rhr, profile);
-    const yesterday = (() => {
-      const d = new Date();
-      d.setDate(d.getDate() - 1);
-      return loadDaySamples(localDateKey(d.getTime()));
+    const strain = computeStrain(daySamples, rhr, profile);
+    const prevKey = (() => {
+      const [y, m, d] = selectedDate.split("-").map(Number);
+      return localDateKey(new Date(y, m - 1, d - 1).getTime());
     })();
-    const yStrain = computeStrain(yesterday, rhr, profile).strain;
+    const yStrain = computeStrain(loadDaySamples(prevKey), rhr, profile).strain;
     const sleep = computeSleepPerformance(recent, rhr, profile, yStrain);
-    let baseline = loadBaseline();
-    if (sleep.bedtime && !sleep.provisional && baseline.nights < 60) {
-      // Soft-update baseline when we have overnight signal (once per day key handled by nights++)
-      // Only bump if last update wasn't today — store flag in session via nights heuristic
-    }
+    const baseline = loadBaseline();
     const recovery = computeRecovery(recent, rhr, sleep, baseline.nights ? baseline : emptyBaseline());
-    return { strain, sleep, recovery, rhr, todayCount: today.length, baseline };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, tick, bpm, status]);
 
-  // Nightly baseline update once when sleep looks valid
+    const stress = stressSeries(daySamples, rhr, profile);
+    const hr = hrSeries(daySamples);
+    return {
+      strain,
+      sleep,
+      recovery,
+      rhr,
+      stress,
+      hr,
+      avgStress: averageStress(stress),
+      count: daySamples.length,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, tick, bpm, status, selectedDate, isToday]);
+
+  // Persist compact day summary for calendar
   useEffect(() => {
-    const { sleep, recovery, rhr, baseline } = metrics;
-    if (sleep.provisional || recovery.hrvMs == null) return;
+    if (metrics.count < 5) return;
+    const hrVals = metrics.hr.map((p) => p.bpm);
+    saveDaySummary({
+      date: selectedDate,
+      recovery: metrics.recovery.provisional ? null : metrics.recovery.recovery,
+      strain: metrics.strain.strain,
+      sleep: metrics.sleep.provisional ? null : metrics.sleep.performance,
+      rhr: metrics.rhr,
+      hrv: metrics.recovery.hrvMs,
+      avgStress: metrics.avgStress,
+      hrAvg: hrVals.length ? Math.round(hrVals.reduce((a, b) => a + b, 0) / hrVals.length) : 0,
+      hrMin: hrVals.length ? Math.min(...hrVals) : 0,
+      hrMax: hrVals.length ? Math.max(...hrVals) : 0,
+    });
+  }, [metrics, selectedDate]);
+
+  useEffect(() => {
+    const { sleep, recovery, rhr } = metrics;
+    if (!isToday || sleep.provisional || recovery.hrvMs == null) return;
     const flag = `pulselab.baseline.${localDateKey()}`;
     if (sessionStorage.getItem(flag)) return;
-    const next = updateBaseline(baseline, recovery.hrvMs, rhr);
-    saveBaseline(next);
+    saveBaseline(updateBaseline(loadBaseline(), recovery.hrvMs, rhr));
     sessionStorage.setItem(flag, "1");
     recompute();
-  }, [metrics, recompute]);
+  }, [metrics, recompute, isToday]);
 
   const ingest = useCallback(
     (sample: HrSample) => {
@@ -152,11 +181,7 @@ export default function Home() {
     setError("");
     setSyncInfo("");
     if (!("bluetooth" in navigator)) {
-      setError(
-        iosHint
-          ? "Safari nie laczy BLE — uzyj Bluefy albo wklej hex z nRF."
-          : "Potrzebny Chrome z Bluetoothem.",
-      );
+      setError(iosHint ? "Safari nie łączy BLE — użyj Bluefy." : "Potrzebny Chrome z Bluetoothem.");
       setStatus("error");
       return;
     }
@@ -177,12 +202,13 @@ export default function Home() {
       const writeCmd = async (buf: Uint8Array, withResponse = false) => {
         const ch = cmdCharRef.current;
         if (!ch) throw new Error("Brak FD4B0002");
-        if (withResponse) await ch.writeValue(buf);
+        const data = buf as unknown as BufferSource;
+        if (withResponse) await ch.writeValue(data);
         else {
           try {
-            await ch.writeValueWithoutResponse(buf);
+            await ch.writeValueWithoutResponse(data);
           } catch {
-            await ch.writeValue(buf);
+            await ch.writeValue(data);
           }
         }
       };
@@ -250,7 +276,7 @@ export default function Home() {
 
   const syncHistory = useCallback(async () => {
     if (!syncRef.current || !cmdCharRef.current) {
-      setError("Najpierw Polacz z Whoop w PulseLab (nie w nRF).");
+      setError("Najpierw połącz z Whoop (nie w nRF).");
       return;
     }
     setError("");
@@ -264,29 +290,6 @@ export default function Home() {
     }
   }, []);
 
-  const decodePaste = useCallback(() => {
-    let n = 0;
-    for (const line of paste.split(/\r?\n/)) {
-      const bytes = parseHexLine(line);
-      if (!bytes) continue;
-      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      const parsed = parseHrPacket(view);
-      if (parsed) {
-        n++;
-        ingest({ t: Date.now() + n * 1000, bpm: parsed.bpm, rrMs: parsed.rrMs });
-      }
-    }
-    setError(n ? "" : "Brak hex tetna (np. 00 4A).");
-  }, [paste, ingest]);
-
-  const downloadCsv = useCallback(() => {
-    const csv = exportCsv(loadRecentSamples(3));
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = `pulselab-${localDateKey()}.csv`;
-    a.click();
-  }, []);
-
   const saveProf = () => {
     saveProfile(profile);
     setShowSettings(false);
@@ -295,148 +298,226 @@ export default function Home() {
 
   const { strain, sleep, recovery } = metrics;
   const recColor = recoveryColor(recovery.band);
+  const dayStart = dayStartMs(selectedDate);
+  const activities = useMemo(() => loadActivities(selectedDate), [selectedDate, tick]);
+  const prettyDate = new Date(dayStart).toLocaleDateString("pl-PL", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
 
   return (
     <div className="app">
       <header className="top">
         <div>
-          <p className="brand">PULSELAB · v2</p>
+          <p className="brand">PULSELAB</p>
           <p className="sub">
             {deviceName || "Recovery · Strain · Sleep"}
             {battery != null ? ` · ${battery}%` : ""}
             {status === "live" ? " · LIVE" : ""}
           </p>
         </div>
-        <button type="button" className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Ustawienia">
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={() => setShowSettings(true)}
+          aria-label="Ustawienia"
+        >
           ⚙
         </button>
       </header>
 
-      <section className="hero-recovery">
-        <ScoreRing
-          value={recovery.provisional ? 0 : recovery.recovery}
-          max={100}
-          size={200}
-          stroke={12}
-          color={recovery.provisional ? "#6b7280" : recColor}
-        >
-          <p className="label">Recovery</p>
-          <p className="big" style={{ color: recovery.provisional ? "#9ca3af" : recColor }}>
-            {recovery.provisional ? "—" : `${recovery.recovery}%`}
-          </p>
-          <p className="hint">
-            {recovery.provisional
-              ? "Czekam na noc"
-              : recovery.band === "green"
-                ? "Gotowy"
-                : recovery.band === "yellow"
-                  ? "Umiarkowanie"
-                  : "Odpoczynek"}
-          </p>
-        </ScoreRing>
-        {recovery.provisional && (
-          <p className="provisional">
-            Recovery liczę dopiero rano po nocy (≥5.5h snu + kilka nocy baseline). 2h noszenia to za mało.
-          </p>
-        )}
-      </section>
+      {tab === "today" && (
+        <>
+          {!isToday && (
+            <div className="viewing-banner">
+              <span>{prettyDate}</span>
+              <button type="button" onClick={() => setSelectedDate(localDateKey())}>
+                Wróć do dziś
+              </button>
+            </div>
+          )}
 
-      <section className="duo">
-        <div className="card">
-          <ScoreRing value={strain.strain} max={21} size={120} stroke={8} color="#00f0ff">
-            <p className="label sm">Strain</p>
-            <p className="mid cyan">{strain.strain.toFixed(1)}</p>
-          </ScoreRing>
-          <p className="card-meta">
-            dziś · {strain.minutesTracked.toFixed(0)} min
-            {strain.minutesTracked < 120 ? " (częściowy)" : ""}
-          </p>
-        </div>
-        <div className="card">
-          <ScoreRing
-            value={sleep.provisional ? 0 : sleep.performance}
-            max={100}
-            size={120}
-            stroke={8}
-            color="#5b8cff"
-          >
-            <p className="label sm">Sleep</p>
-            <p className="mid blue">{sleep.provisional ? "—" : `${sleep.performance}%`}</p>
-          </ScoreRing>
-          <p className="card-meta">
-            {sleep.provisional
-              ? "czekam na noc"
-              : `${sleep.hoursAsleep.toFixed(1)}h / ${sleep.hoursNeeded.toFixed(1)}h`}
-          </p>
-        </div>
-      </section>
+          <section className="hero-recovery">
+            <ScoreRing
+              value={recovery.provisional ? 0 : recovery.recovery}
+              max={100}
+              size={200}
+              stroke={12}
+              color={recovery.provisional ? "#6b7280" : recColor}
+            >
+              <p className="label">Recovery</p>
+              <p className="big" style={{ color: recovery.provisional ? "#9ca3af" : recColor }}>
+                {recovery.provisional ? "—" : `${recovery.recovery}%`}
+              </p>
+              <p className="hint">
+                {recovery.provisional
+                  ? "Czekam na noc"
+                  : recovery.band === "green"
+                    ? "Gotowy"
+                    : recovery.band === "yellow"
+                      ? "Umiarkowanie"
+                      : "Odpoczynek"}
+              </p>
+            </ScoreRing>
+            {recovery.provisional && isToday && (
+              <p className="provisional">
+                Recovery liczę rano po nocy (≥5.5h snu + kilka nocy baseline).
+              </p>
+            )}
+          </section>
 
-      <section className="vitals">
-        <div className="vital">
-          <span className="v-label">HR</span>
-          <span className="v-val">{bpm ?? "—"}</span>
-          <span className="v-unit">bpm</span>
-          <svg className="mini-spark" viewBox="0 0 140 40">
-            <path d={path} fill="none" stroke="#16ec92" strokeWidth="2" />
-          </svg>
-        </div>
-        <div className="vital">
-          <span className="v-label">HRV</span>
-          <span className="v-val">{recovery.hrvMs ?? "—"}</span>
-          <span className="v-unit">ms</span>
-        </div>
-        <div className="vital">
-          <span className="v-label">RHR</span>
-          <span className="v-val">{metrics.rhr}</span>
-          <span className="v-unit">bpm</span>
-        </div>
-      </section>
+          <section className="duo">
+            <div className="card">
+              <ScoreRing value={strain.strain} max={21} size={116} stroke={8} color="#00f0ff">
+                <p className="label sm">Strain</p>
+                <p className="mid cyan">{strain.strain.toFixed(1)}</p>
+              </ScoreRing>
+              <p className="card-meta">
+                {strain.minutesTracked.toFixed(0)} min{strain.minutesTracked < 120 ? " (częściowy)" : ""}
+              </p>
+            </div>
+            <div className="card">
+              <ScoreRing
+                value={sleep.provisional ? 0 : sleep.performance}
+                max={100}
+                size={116}
+                stroke={8}
+                color="#5b8cff"
+              >
+                <p className="label sm">Sleep</p>
+                <p className="mid blue">{sleep.provisional ? "—" : `${sleep.performance}%`}</p>
+              </ScoreRing>
+              <p className="card-meta">
+                {sleep.provisional ? "czekam na noc" : `${sleep.hoursAsleep.toFixed(1)}h / ${sleep.hoursNeeded.toFixed(1)}h`}
+              </p>
+            </div>
+          </section>
 
-      <section className="actions">
-        {status === "live" ? (
-          <button type="button" className="primary" onClick={disconnect}>
-            Rozlacz
-          </button>
-        ) : (
-          <button type="button" className="primary" onClick={connect} disabled={status === "connecting"}>
-            {status === "connecting" ? "Lacze…" : "Polacz z Whoop"}
-          </button>
-        )}
+          <section className="vitals">
+            <div className="vital">
+              <span className="v-label">HR</span>
+              <span className="v-val">{isToday ? bpm ?? "—" : metrics.hr.at(-1)?.bpm ?? "—"}</span>
+              <span className="v-unit">bpm</span>
+              {isToday && (
+                <svg className="mini-spark" viewBox="0 0 140 40">
+                  <path d={path} fill="none" stroke="#16ec92" strokeWidth="2" />
+                </svg>
+              )}
+            </div>
+            <div className="vital">
+              <span className="v-label">HRV</span>
+              <span className="v-val">{recovery.hrvMs ?? "—"}</span>
+              <span className="v-unit">ms</span>
+            </div>
+            <div className="vital">
+              <span className="v-label">RHR</span>
+              <span className="v-val">{metrics.rhr}</span>
+              <span className="v-unit">bpm</span>
+            </div>
+          </section>
+
+          <section className="charts">
+            <DayChart
+              title="Poziom stresu"
+              unit="Skala 0–10 (z tętna)"
+              color="#f5a524"
+              points={metrics.stress.map((p) => ({ t: p.t, v: p.level }))}
+              dayStart={dayStart}
+              yMin={0}
+              yMax={10}
+              activities={activities}
+              headline={metrics.stress.length ? `Ø ${metrics.avgStress.toFixed(1)}` : undefined}
+            />
+            <DayChart
+              title="Tętno w ciągu dnia"
+              unit="bpm"
+              color="#16ec92"
+              points={metrics.hr.map((p) => ({ t: p.t, v: p.bpm }))}
+              dayStart={dayStart}
+              activities={activities}
+              headline={metrics.hr.length ? `${metrics.hr.at(-1)?.bpm ?? ""} bpm` : undefined}
+            />
+          </section>
+
+          {isToday && (
+            <section className="actions">
+              {status === "live" ? (
+                <button type="button" className="primary" onClick={disconnect}>
+                  Rozłącz
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={connect}
+                  disabled={status === "connecting"}
+                >
+                  {status === "connecting" ? "Łączę…" : "Połącz z Whoop"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="ghost"
+                onClick={syncHistory}
+                disabled={status !== "live" || syncing}
+              >
+                {syncing ? "Pobieram…" : "Historia"}
+              </button>
+            </section>
+          )}
+          {syncInfo && <p className="provisional">{syncInfo}</p>}
+          {error && <p className="err">{error}</p>}
+          {!bleOk && iosHint && (
+            <aside className="banner">iPhone: użyj przeglądarki Bluefy do połączenia BLE.</aside>
+          )}
+        </>
+      )}
+
+      {tab === "calendar" && (
+        <CalendarView
+          selected={selectedDate}
+          onSelect={(d) => {
+            setSelectedDate(d);
+            setTab("today");
+          }}
+        />
+      )}
+
+      {tab === "activities" && (
+        <ActivitiesView selectedDate={selectedDate} onChange={recompute} />
+      )}
+
+      <nav className="bottom-nav">
         <button
           type="button"
-          className="secondary"
-          onClick={syncHistory}
-          disabled={status !== "live" || syncing}
+          className={tab === "today" ? "on" : ""}
+          onClick={() => setTab("today")}
         >
-          {syncing ? "Pobieram…" : "Pobierz historie"}
+          <span className="nav-ic">◎</span>
+          Dziś
         </button>
-        <button type="button" className="ghost" onClick={downloadCsv}>
-          CSV
+        <button
+          type="button"
+          className={tab === "calendar" ? "on" : ""}
+          onClick={() => setTab("calendar")}
+        >
+          <span className="nav-ic">🗓</span>
+          Kalendarz
         </button>
-      </section>
-      {syncInfo && <p className="provisional">{syncInfo}</p>}
-
-      {!bleOk && iosHint && (
-        <aside className="banner">iPhone: Bluefy do BLE, albo wklej hex z nRF ponizej.</aside>
-      )}
-      {error && <p className="err">{error}</p>}
-
-      <section className="paste">
-        <h2>Wklej z nRF (2A37)</h2>
-        <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={3} placeholder="00 4A" />
-        <button type="button" className="secondary" onClick={decodePaste}>
-          Dodaj do dziennika
+        <button
+          type="button"
+          className={tab === "activities" ? "on" : ""}
+          onClick={() => setTab("activities")}
+        >
+          <span className="nav-ic">🏃</span>
+          Aktywności
         </button>
-      </section>
-
-      <footer className="foot">
-        IMU = akcelerometr (ruch) — zostaw włączony, gdy zbierasz dane. „Pobierz historie” ściąga z
-        opaski HR+RR+accel+temp (1 Hz). Sleep score i tak dopiero po prawdziwej nocy.
-      </footer>
+      </nav>
 
       {showSettings && (
-        <div className="modal" role="dialog">
-          <div className="modal-card">
+        <div className="modal" role="dialog" onClick={() => setShowSettings(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <h2>Profil</h2>
             <label>
               Wiek
@@ -447,18 +528,18 @@ export default function Home() {
               />
             </label>
             <label>
-              Plec (TRIMP)
+              Płeć (TRIMP)
               <select
                 value={profile.sex}
                 onChange={(e) => setProfile({ ...profile, sex: e.target.value as Profile["sex"] })}
               >
                 <option value="u">Nie podano</option>
-                <option value="m">Mezczyzna</option>
+                <option value="m">Mężczyzna</option>
                 <option value="f">Kobieta</option>
               </select>
             </label>
             <label>
-              RHR hint (opcjonalnie)
+              Tętno spoczynkowe (opcjonalnie)
               <input
                 type="number"
                 value={profile.restingHrHint ?? ""}

@@ -1,4 +1,4 @@
-/** Local persistence for HR samples, profile, baselines. */
+/** Local persistence: HR samples, profile, baselines, activities, favorites, day summaries. */
 
 import { Baseline, emptyBaseline } from "./metrics/recovery";
 import { HrSample, Profile, localDateKey } from "./metrics/types";
@@ -6,6 +6,11 @@ import { HrSample, Profile, localDateKey } from "./metrics/types";
 const PROFILE_KEY = "pulselab.profile";
 const BASELINE_KEY = "pulselab.baseline";
 const SAMPLES_KEY = "pulselab.samples.v1";
+const ACTIVITIES_KEY = "pulselab.activities.v1";
+const FAVSPORTS_KEY = "pulselab.favsports.v1";
+const SUMMARY_KEY = "pulselab.summaries.v1";
+
+const MAX_SAMPLE_DAYS = 8;
 
 export function loadProfile(): Profile {
   if (typeof window === "undefined") return { age: 30, sex: "u" };
@@ -37,9 +42,12 @@ export function saveBaseline(b: Baseline): void {
   localStorage.setItem(BASELINE_KEY, JSON.stringify(b));
 }
 
+/* ---------------- HR samples ---------------- */
+
 type StoreShape = Record<string, HrSample[]>;
 
 function readAll(): StoreShape {
+  if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(SAMPLES_KEY);
     return raw ? JSON.parse(raw) : {};
@@ -49,12 +57,24 @@ function readAll(): StoreShape {
 }
 
 function writeAll(data: StoreShape): void {
-  // Cap ~3 days of dense samples to avoid quota issues
   const keys = Object.keys(data).sort();
-  while (keys.length > 4) {
+  while (keys.length > MAX_SAMPLE_DAYS) {
     delete data[keys.shift()!];
   }
-  localStorage.setItem(SAMPLES_KEY, JSON.stringify(data));
+  try {
+    localStorage.setItem(SAMPLES_KEY, JSON.stringify(data));
+  } catch {
+    // Quota — drop oldest and retry once
+    const k = Object.keys(data).sort();
+    if (k.length) {
+      delete data[k[0]!];
+      try {
+        localStorage.setItem(SAMPLES_KEY, JSON.stringify(data));
+      } catch {
+        /* give up silently */
+      }
+    }
+  }
 }
 
 export function appendSample(sample: HrSample): void {
@@ -62,7 +82,6 @@ export function appendSample(sample: HrSample): void {
   const key = localDateKey(sample.t);
   const list = all[key] ?? [];
   const last = list[list.length - 1];
-  // Downsample: keep ~every 5s unless RR / accel present
   const rich = !!(sample.rrMs?.length || sample.accelG || sample.skinTempRaw);
   if (last && sample.t - last.t < 5000 && !rich) {
     list[list.length - 1] = sample;
@@ -94,10 +113,111 @@ export function loadRecentSamples(days = 2): HrSample[] {
   return out.sort((a, b) => a.t - b.t);
 }
 
-export function exportCsv(samples: HrSample[]): string {
-  const lines = ["timestamp,bpm,rr_ms"];
-  for (const s of samples) {
-    lines.push(`${new Date(s.t).toISOString()},${s.bpm},${(s.rrMs ?? []).join("|")}`);
+/* ---------------- Activities ---------------- */
+
+export type Activity = {
+  id: string;
+  sport: string;
+  start: number;
+  end: number;
+  manual: boolean;
+  note?: string;
+};
+
+type ActivityStore = Record<string, Activity[]>;
+
+function readActivities(): ActivityStore {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(ACTIVITIES_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
   }
-  return lines.join("\n");
+}
+
+function writeActivities(data: ActivityStore): void {
+  localStorage.setItem(ACTIVITIES_KEY, JSON.stringify(data));
+}
+
+export function addActivity(a: Omit<Activity, "id">): Activity {
+  const all = readActivities();
+  const key = localDateKey(a.start);
+  const activity: Activity = { ...a, id: `${a.start}-${Math.random().toString(36).slice(2, 7)}` };
+  all[key] = [...(all[key] ?? []), activity].sort((x, y) => x.start - y.start);
+  writeActivities(all);
+  return activity;
+}
+
+export function removeActivity(dateKey: string, id: string): void {
+  const all = readActivities();
+  all[dateKey] = (all[dateKey] ?? []).filter((a) => a.id !== id);
+  writeActivities(all);
+}
+
+export function loadActivities(date = localDateKey()): Activity[] {
+  return readActivities()[date] ?? [];
+}
+
+/* ---------------- Favorite sports ---------------- */
+
+export function loadFavoriteSports(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(FAVSPORTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function toggleFavoriteSport(id: string): string[] {
+  const cur = loadFavoriteSports();
+  const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+  localStorage.setItem(FAVSPORTS_KEY, JSON.stringify(next));
+  return next;
+}
+
+/* ---------------- Day summaries (for calendar) ---------------- */
+
+export type DaySummary = {
+  date: string;
+  recovery: number | null;
+  strain: number;
+  sleep: number | null;
+  rhr: number;
+  hrv: number | null;
+  avgStress: number;
+  hrAvg: number;
+  hrMin: number;
+  hrMax: number;
+};
+
+type SummaryStore = Record<string, DaySummary>;
+
+function readSummaries(): SummaryStore {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(SUMMARY_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveDaySummary(s: DaySummary): void {
+  const all = readSummaries();
+  all[s.date] = s;
+  // keep ~180 days of tiny summaries
+  const keys = Object.keys(all).sort();
+  while (keys.length > 180) delete all[keys.shift()!];
+  localStorage.setItem(SUMMARY_KEY, JSON.stringify(all));
+}
+
+export function loadDaySummary(date: string): DaySummary | null {
+  return readSummaries()[date] ?? null;
+}
+
+export function loadSummaries(): SummaryStore {
+  return readSummaries();
 }
