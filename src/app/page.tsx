@@ -8,7 +8,7 @@ import { ActivitiesView } from "../components/ActivitiesView";
 import { computeRecovery, emptyBaseline, updateBaseline } from "../lib/metrics/recovery";
 import { estimateRestingHr, computeSleepPerformance } from "../lib/metrics/sleep";
 import { computeStrain } from "../lib/metrics/strain";
-import { stressSeries, averageStress, hrSeries } from "../lib/metrics/stress";
+import { stressSeries, averageStress, hrSeries, currentStress, stressBandLabel } from "../lib/metrics/stress";
 import { Profile, HrSample, localDateKey, DEFAULT_PROFILE } from "../lib/metrics/types";
 import {
   appendSample,
@@ -132,6 +132,7 @@ export default function Home() {
       stress,
       hr,
       avgStress: averageStress(stress),
+      nowStress: currentStress(stress),
       count: daySamples.length,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -491,14 +492,18 @@ export default function Home() {
           <section className="charts">
             <DayChart
               title="Poziom stresu"
-              unit="Skala 0–10 (z tętna)"
+              unit="0–10 · HRV (RMSSD) + %HRR · wygładzony"
               color="#f5a524"
               points={metrics.stress.map((p) => ({ t: p.t, v: p.level }))}
               dayStart={dayStart}
               yMin={0}
               yMax={10}
               activities={activities}
-              headline={metrics.stress.length ? `Ø ${metrics.avgStress.toFixed(1)}` : undefined}
+              headline={
+                metrics.nowStress != null
+                  ? `${metrics.nowStress.toFixed(1)} · ${stressBandLabel(metrics.nowStress)}`
+                  : undefined
+              }
             />
             <DayChart
               title="Tętno w ciągu dnia"
