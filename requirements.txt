@@ -1,0 +1,4 @@
+# Whoop 5.0 — lokalny dekoder (bez BLE na PC)
+# bleaky/logger opcjonalne gdy bedziesz mial adapter BT
+
+# (brak zewnetrznych zaleznosci do dekodowania)

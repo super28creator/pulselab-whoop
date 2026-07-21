@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+dist/
+.env*
+*.log
+__pycache__/
+*.pyc
+.vercel/
+data_log.csv
+*.decoded.csv
+.DS_Store

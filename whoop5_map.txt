@@ -1,0 +1,22 @@
+# Whoop 5.0 map (z Twoich screenow nRF Connect)
+# Glowny program: python whoop.py guide | commands | decode
+
+[device]
+name = WHOOP 5AG0439962
+model = Whoop 5.0
+firmware = 50.36.2.0
+codename = maverick
+
+[service.custom]
+uuid = fd4b0001-cce1-4033-93ce-002d5875f58a
+cmd_write   = fd4b0002-cce1-4033-93ce-002d5875f58a
+cmd_notify  = fd4b0003-cce1-4033-93ce-002d5875f58a
+event_notify= fd4b0004-cce1-4033-93ce-002d5875f58a
+data_notify = fd4b0005-cce1-4033-93ce-002d5875f58a
+diagnostics = fd4b0007-cce1-4033-93ce-002d5875f58a
+
+[service.standard]
+heart_rate_service = 180D
+heart_rate_char    = 2A37
+battery_service    = 180F
+battery_char       = 2A19

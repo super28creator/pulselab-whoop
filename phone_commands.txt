@@ -1,0 +1,12 @@
+# nRF Connect iOS - jesli Write ODRZUCA, uzyj WERSJI BEZ SPACJI
+# Typ danych: HEX (nie Text, nie UTF-8)
+# Preferuj: Write Without Response (jesli jest wybor)
+
+# 1) Client Hello
+AA0108000001E67123019101363E5C8D
+
+# 2) Realtime HR ON
+AA0108000001E67123010301AED62BCE
+
+# 3) Bateria (test - krotki)
+AA0108000001E67123011A00204F2C22
