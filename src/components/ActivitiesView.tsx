@@ -35,13 +35,15 @@ type Props = {
   onChange: () => void;
 };
 
+type SportChoice = { sport: Sport; mode: "choose" | "past" };
+
 export function ActivitiesView({ selectedDate, onChange }: Props) {
   const [query, setQuery] = useState("");
   const [favs, setFavs] = useState<string[]>(() => loadFavoriteSports());
   const [active, setActive] = useState<ActiveSession | null>(() => loadActiveSession());
   const [now, setNow] = useState(Date.now());
   const [edit, setEdit] = useState<Activity | null>(null);
-  const [manualSport, setManualSport] = useState<Sport | null>(null);
+  const [choice, setChoice] = useState<SportChoice | null>(null);
   const [tick, setTick] = useState(0);
   const isToday = selectedDate === localDateKey();
 
@@ -70,17 +72,19 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
     onChange();
   };
 
-  const startSport = (sport: Sport) => {
+  const onSportTap = (sport: Sport) => {
     if (!isToday) {
-      setManualSport(sport);
+      setChoice({ sport, mode: "past" });
       return;
     }
-    if (active) {
-      // already running — ignore or ask? just return
-      return;
-    }
+    if (active) return;
+    setChoice({ sport, mode: "choose" });
+  };
+
+  const startNow = (sport: Sport) => {
     startActiveSession(sport.id);
     setActive(loadActiveSession());
+    setChoice(null);
     onChange();
   };
 
@@ -130,7 +134,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
                 key={id}
                 type="button"
                 className="act-chip"
-                onClick={() => startSport(s)}
+                onClick={() => onSportTap(s)}
                 disabled={!!active && isToday}
               >
                 <span className="act-emoji">{s.emoji}</span>
@@ -146,9 +150,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
           ? "Trening w toku — zakończ, żeby zacząć inny"
           : query
             ? `Wyniki (${results.length})`
-            : isToday
-              ? "Wybierz sport — Start"
-              : "Dodaj ręcznie (edycja przeszłości)"}
+            : "Start teraz albo dodaj z pamięci"}
       </div>
 
       <div className="act-grid">
@@ -157,7 +159,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
             <button
               type="button"
               className="act-item-main"
-              onClick={() => startSport(s)}
+              onClick={() => onSportTap(s)}
               disabled={!!active && isToday}
             >
               <span className="act-emoji lg">{s.emoji}</span>
@@ -179,11 +181,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
         Historia — {isToday ? "dziś" : selectedDate}
       </div>
       {activities.length === 0 ? (
-        <p className="act-empty">
-          {isToday
-            ? "Wybierz sport i naciśnij — zapisze się dopiero po zakończeniu."
-            : "Brak aktywności w tym dniu."}
-        </p>
+        <p className="act-empty">Brak aktywności. Tap sportu → Start albo „zapomniałem”.</p>
       ) : (
         <ul className="act-log">
           {activities.map((a: Activity) => {
@@ -202,8 +200,10 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
                   type="button"
                   className="act-del"
                   onClick={() => {
-                    removeActivity(selectedDate, a.id);
-                    refresh();
+                    if (confirm(`Usunąć ${s.name}?`)) {
+                      removeActivity(selectedDate, a.id);
+                      refresh();
+                    }
                   }}
                   aria-label="Usuń"
                 >
@@ -224,16 +224,43 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
             setEdit(null);
             refresh();
           }}
+          onDeleted={() => {
+            setEdit(null);
+            refresh();
+          }}
         />
       )}
 
-      {manualSport && (
+      {choice?.mode === "choose" && (
+        <div className="modal" role="dialog" onClick={() => setChoice(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h2>
+              {choice.sport.emoji} {choice.sport.name}
+            </h2>
+            <button type="button" className="primary choice-btn" onClick={() => startNow(choice.sport)}>
+              Start teraz
+            </button>
+            <button
+              type="button"
+              className="ghost choice-btn"
+              onClick={() => setChoice({ sport: choice.sport, mode: "past" })}
+            >
+              Zapomniałem — dodaj z godzin
+            </button>
+            <button type="button" className="ghost choice-btn" onClick={() => setChoice(null)}>
+              Anuluj
+            </button>
+          </div>
+        </div>
+      )}
+
+      {choice?.mode === "past" && (
         <ManualPastForm
-          sport={manualSport}
+          sport={choice.sport}
           selectedDate={selectedDate}
-          onClose={() => setManualSport(null)}
+          onClose={() => setChoice(null)}
           onSaved={() => {
-            setManualSport(null);
+            setChoice(null);
             refresh();
           }}
         />
@@ -247,11 +274,13 @@ function EditActivityForm({
   dateKey,
   onClose,
   onSaved,
+  onDeleted,
 }: {
   activity: Activity;
   dateKey: string;
   onClose: () => void;
   onSaved: () => void;
+  onDeleted: () => void;
 }) {
   const s = sportById(activity.sport);
   const toTime = (ms: number) => {
@@ -274,6 +303,12 @@ function EditActivityForm({
     onSaved();
   };
 
+  const del = () => {
+    if (!confirm(`Usunąć ${s.name}?`)) return;
+    removeActivity(dateKey, activity.id);
+    onDeleted();
+  };
+
   return (
     <div className="modal" role="dialog" onClick={onClose}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
@@ -289,19 +324,21 @@ function EditActivityForm({
           <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
         </label>
         <div className="modal-actions">
-          <button type="button" className="ghost" onClick={onClose}>
-            Anuluj
+          <button type="button" className="ghost danger" onClick={del}>
+            Usuń
           </button>
           <button type="button" className="primary" onClick={save}>
             Zapisz
           </button>
         </div>
+        <button type="button" className="ghost choice-btn" onClick={onClose} style={{ marginTop: "0.5rem" }}>
+          Anuluj
+        </button>
       </div>
     </div>
   );
 }
 
-/** For past days only — start/end times. */
 function ManualPastForm({
   sport,
   selectedDate,
@@ -313,8 +350,12 @@ function ManualPastForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [startTime, setStartTime] = useState("18:00");
-  const [endTime, setEndTime] = useState("19:00");
+  const now = new Date();
+  const defEnd = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const hourAgo = new Date(now.getTime() - 60 * 60_000);
+  const defStart = `${String(hourAgo.getHours()).padStart(2, "0")}:${String(hourAgo.getMinutes()).padStart(2, "0")}`;
+  const [startTime, setStartTime] = useState(defStart);
+  const [endTime, setEndTime] = useState(defEnd);
 
   const save = () => {
     const [Y, Mo, D] = selectedDate.split("-").map(Number);
@@ -336,7 +377,7 @@ function ManualPastForm({
           {sport.emoji} {sport.name}
         </h2>
         <p className="provisional" style={{ textAlign: "left", maxWidth: "none", margin: "0 0 0.75rem" }}>
-          Dodajesz aktywność do przeszłego dnia — podaj godziny.
+          Dodaj aktywność z wcześniejszych godzin (gdy zapomniałeś włączyć).
         </p>
         <label>
           Start

@@ -80,6 +80,8 @@ export default function Home() {
   const deviceRef = useRef<BluetoothDevice | null>(null);
   const cmdCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
   const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
+  const lastRecomputeRef = useRef(0);
+  const autoSyncedRef = useRef(false);
   const path = useSparkPath(hrSpark, 140, 40);
 
   const isToday = selectedDate === localDateKey();
@@ -92,11 +94,19 @@ export default function Home() {
     setActive(loadActiveSession());
   }, []);
 
+  // Timer only for live banner — NOT for charts/metrics (was causing lag)
   useEffect(() => {
     if (!active) return;
     const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
   }, [active]);
+
+  // Refresh live chart segment every 30s only
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => recompute(), 30_000);
+    return () => clearInterval(id);
+  }, [active, recompute]);
 
   const metrics = useMemo(() => {
     const daySamples = loadDaySamples(selectedDate);
@@ -127,7 +137,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, tick, bpm, status, selectedDate, isToday]);
 
-  // Persist compact day summary for calendar
+  // Persist compact day summary for calendar (debounced via count gate)
   useEffect(() => {
     if (metrics.count < 5) return;
     const hrVals = metrics.hr.map((p) => p.bpm);
@@ -143,7 +153,9 @@ export default function Home() {
       hrMin: hrVals.length ? Math.min(...hrVals) : 0,
       hrMax: hrVals.length ? Math.max(...hrVals) : 0,
     });
-  }, [metrics, selectedDate]);
+    // only when day / key metrics change — not every bpm
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, metrics.count, metrics.strain.strain, metrics.recovery.recovery, metrics.sleep.performance]);
 
   useEffect(() => {
     const { sleep, recovery, rhr } = metrics;
@@ -160,7 +172,12 @@ export default function Home() {
       appendSample(sample);
       setBpm(sample.bpm);
       setHrSpark((h) => [...h.slice(-80), sample.bpm]);
-      recompute();
+      const now = Date.now();
+      // Throttle heavy metric recompute — was freezing UI on every BLE packet
+      if (now - lastRecomputeRef.current > 4000) {
+        lastRecomputeRef.current = now;
+        recompute();
+      }
     },
     [recompute],
   );
@@ -185,6 +202,7 @@ export default function Home() {
     deviceRef.current = null;
     cmdCharRef.current = null;
     syncRef.current = null;
+    autoSyncedRef.current = false;
     setStatus("idle");
     setDeviceName("");
     setSyncing(false);
@@ -234,10 +252,15 @@ export default function Home() {
         }
       });
       sync.subscribe((p: SyncProgress) => {
-        setSyncInfo(p.error ? p.error : p.status);
-        if (p.done) {
+        if (p.error) setSyncInfo(p.error);
+        else if (!p.done) setSyncInfo(p.status);
+        else {
+          setSyncInfo(p.records > 0 ? `Zsynchronizowano ${p.records} rekordów` : "");
           setSyncing(false);
+          lastRecomputeRef.current = Date.now();
           recompute();
+          // Clear success message after a few seconds
+          setTimeout(() => setSyncInfo(""), 4000);
         }
       });
       syncRef.current = sync;
@@ -264,8 +287,6 @@ export default function Home() {
         await writeCmd(CMD.clientHello());
         await new Promise((r) => setTimeout(r, 300));
         await writeCmd(CMD.realtimeHrOn());
-        await new Promise((r) => setTimeout(r, 200));
-        await writeCmd(CMD.imuRawOn());
       } catch {
         /* custom service needs bond; 2A37 may still work */
       }
@@ -281,27 +302,22 @@ export default function Home() {
       await hrChar.startNotifications();
       hrChar.addEventListener("characteristicvaluechanged", onHr);
       setStatus("live");
+
+      // Auto history sync once per connection — no manual button needed
+      if (cmdCharRef.current && syncRef.current && !autoSyncedRef.current) {
+        autoSyncedRef.current = true;
+        setSyncing(true);
+        setSyncInfo("Synchronizuję dane z opaski…");
+        void syncRef.current.start().catch((e) => {
+          setSyncing(false);
+          setSyncInfo(e instanceof Error ? e.message : String(e));
+        });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
   }, [iosHint, onHr, recompute]);
-
-  const syncHistory = useCallback(async () => {
-    if (!syncRef.current || !cmdCharRef.current) {
-      setError("Najpierw połącz z Whoop (nie w nRF).");
-      return;
-    }
-    setError("");
-    setSyncing(true);
-    setSyncInfo("Start sync…");
-    try {
-      await syncRef.current.start();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setSyncing(false);
-    }
-  }, []);
 
   const saveProf = () => {
     saveProfile(profile);
@@ -314,18 +330,19 @@ export default function Home() {
   const dayStart = dayStartMs(selectedDate);
   const activities = useMemo(() => {
     const list = loadActivities(selectedDate);
-    // Show live session on charts as open-ended until stop
     if (active && isToday) {
       list.push({
         id: "live",
         sport: active.sport,
         start: active.start,
-        end: nowTick,
+        end: Date.now(),
         manual: false,
       });
     }
     return list;
-  }, [selectedDate, tick, active, isToday, nowTick]);
+    // nowTick intentionally omitted — chart live bar refreshes via 30s recompute
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, tick, active, isToday]);
   const prettyDate = new Date(dayStart).toLocaleDateString("pl-PL", {
     weekday: "long",
     day: "numeric",
@@ -495,7 +512,7 @@ export default function Home() {
           </section>
 
           {isToday && (
-            <section className="actions">
+            <section className="actions single">
               {status === "live" ? (
                 <button type="button" className="primary" onClick={disconnect}>
                   Rozłącz
@@ -505,22 +522,20 @@ export default function Home() {
                   type="button"
                   className="primary"
                   onClick={connect}
-                  disabled={status === "connecting"}
+                  disabled={status === "connecting" || syncing}
                 >
-                  {status === "connecting" ? "Łączę…" : "Połącz z Whoop"}
+                  {status === "connecting"
+                    ? "Łączę…"
+                    : syncing
+                      ? "Synchronizuję…"
+                      : "Połącz z Whoop"}
                 </button>
               )}
-              <button
-                type="button"
-                className="ghost"
-                onClick={syncHistory}
-                disabled={status !== "live" || syncing}
-              >
-                {syncing ? "Pobieram…" : "Historia"}
-              </button>
             </section>
           )}
-          {syncInfo && <p className="provisional">{syncInfo}</p>}
+          {(syncInfo || syncing) && (
+            <p className="provisional">{syncInfo || "Synchronizuję dane z opaski…"}</p>
+          )}
           {error && <p className="err">{error}</p>}
           {!bleOk && iosHint && (
             <aside className="banner">iPhone: użyj przeglądarki Bluefy do połączenia BLE.</aside>

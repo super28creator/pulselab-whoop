@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { sportById } from "../lib/sports";
 import type { Activity } from "../lib/store";
 
@@ -19,25 +19,35 @@ type Props = {
 };
 
 const DAY_MS = 24 * 60 * 60_000;
+const PAD = { l: 36, r: 8, t: 8, b: 22 };
 
 function buildPath(
   points: ChartPoint[],
   dayStart: number,
-  w: number,
-  h: number,
+  plotW: number,
+  plotH: number,
   yMin: number,
   yMax: number,
 ): { line: string; area: string } {
   if (points.length < 2) return { line: "", area: "" };
   const span = Math.max(yMax - yMin, 1);
   const xy = points.map((p) => {
-    const x = ((p.t - dayStart) / DAY_MS) * w;
-    const y = h - ((p.v - yMin) / span) * h;
-    return [Math.max(0, Math.min(w, x)), Math.max(0, Math.min(h, y))] as const;
+    const x = PAD.l + ((p.t - dayStart) / DAY_MS) * plotW;
+    const y = PAD.t + (plotH - ((p.v - yMin) / span) * plotH);
+    return [Math.max(PAD.l, Math.min(PAD.l + plotW, x)), Math.max(PAD.t, Math.min(PAD.t + plotH, y))] as const;
   });
   const line = xy.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  const area = `${line} L${xy[xy.length - 1]![0].toFixed(1)},${h} L${xy[0]![0].toFixed(1)},${h} Z`;
+  const baseY = PAD.t + plotH;
+  const area = `${line} L${xy[xy.length - 1]![0].toFixed(1)},${baseY} L${xy[0]![0].toFixed(1)},${baseY} Z`;
   return { line, area };
+}
+
+function niceTicks(min: number, max: number, count = 5): number[] {
+  const span = Math.max(max - min, 1);
+  const step = span / (count - 1);
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) out.push(Math.round((min + step * i) * 10) / 10);
+  return out;
 }
 
 function ChartSvg({
@@ -49,7 +59,7 @@ function ChartSvg({
   yMin,
   yMax,
   activities,
-  showHours,
+  showScale,
   id,
 }: {
   points: ChartPoint[];
@@ -60,23 +70,21 @@ function ChartSvg({
   yMin: number;
   yMax: number;
   activities?: Activity[];
-  showHours?: boolean;
+  showScale?: boolean;
   id: string;
 }) {
+  const plotW = w - PAD.l - PAD.r;
+  const plotH = h - PAD.t - PAD.b;
   const { line, area } = useMemo(
-    () => buildPath(points, dayStart, w, h, yMin, yMax),
-    [points, dayStart, w, h, yMin, yMax],
+    () => buildPath(points, dayStart, plotW, plotH, yMin, yMax),
+    [points, dayStart, plotW, plotH, yMin, yMax],
   );
   const gid = `grad-${id}`;
+  const yTicks = niceTicks(yMin, yMax, showScale ? 5 : 3);
+  const span = Math.max(yMax - yMin, 1);
 
   return (
-    <svg
-      viewBox={`0 0 ${w} ${h + (showHours ? 18 : 0)}`}
-      preserveAspectRatio="none"
-      className="daychart-svg"
-      width="100%"
-      height={h + (showHours ? 18 : 0)}
-    >
+    <svg viewBox={`0 0 ${w} ${h}`} className="daychart-svg" width="100%" height={h} preserveAspectRatio="xMidYMid meet">
       <defs>
         <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.35" />
@@ -84,16 +92,31 @@ function ChartSvg({
         </linearGradient>
       </defs>
 
+      {/* Y grid + scale */}
+      {yTicks.map((v) => {
+        const y = PAD.t + (plotH - ((v - yMin) / span) * plotH);
+        return (
+          <g key={`y${v}`}>
+            <line x1={PAD.l} y1={y} x2={PAD.l + plotW} y2={y} stroke="rgba(255,255,255,0.06)" />
+            {showScale && (
+              <text x={PAD.l - 4} y={y + 3} textAnchor="end" fontSize="9" fill="#8a8a92">
+                {Number.isInteger(v) ? v : v.toFixed(1)}
+              </text>
+            )}
+          </g>
+        );
+      })}
+
       {activities?.map((a) => {
-        const x1 = ((a.start - dayStart) / DAY_MS) * w;
-        const x2 = ((Math.min(a.end, dayStart + DAY_MS) - dayStart) / DAY_MS) * w;
+        const x1 = PAD.l + ((a.start - dayStart) / DAY_MS) * plotW;
+        const x2 = PAD.l + ((Math.min(a.end, dayStart + DAY_MS) - dayStart) / DAY_MS) * plotW;
         const bw = Math.max(2, x2 - x1);
         return (
           <g key={a.id}>
-            <rect x={Math.max(0, x1)} y={0} width={bw} height={h} fill="rgba(255,255,255,0.07)" />
-            <rect x={Math.max(0, x1)} y={0} width={2} height={h} fill={color} opacity="0.5" />
-            {showHours && (
-              <text x={Math.max(0, x1) + 4} y={12} fontSize="10" fill="#9aa">
+            <rect x={Math.max(PAD.l, x1)} y={PAD.t} width={bw} height={plotH} fill="rgba(255,255,255,0.07)" />
+            <rect x={Math.max(PAD.l, x1)} y={PAD.t} width={2} height={plotH} fill={color} opacity="0.5" />
+            {showScale && (
+              <text x={Math.max(PAD.l, x1) + 4} y={PAD.t + 12} fontSize="10" fill="#9aa">
                 {sportById(a.sport).emoji}
               </text>
             )}
@@ -104,18 +127,17 @@ function ChartSvg({
       {area && <path d={area} fill={`url(#${gid})`} />}
       {line && <path d={line} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" />}
 
-      {showHours &&
-        [0, 6, 12, 18, 24].map((hr) => {
-          const x = (hr / 24) * w;
-          return (
-            <g key={hr}>
-              <line x1={x} y1={0} x2={x} y2={h} stroke="rgba(255,255,255,0.06)" />
-              <text x={Math.min(w - 18, Math.max(0, x + 2))} y={h + 14} fontSize="10" fill="#9aa">
-                {hr}:00
-              </text>
-            </g>
-          );
-        })}
+      {[0, 6, 12, 18, 24].map((hr) => {
+        const x = PAD.l + (hr / 24) * plotW;
+        return (
+          <g key={hr}>
+            <line x1={x} y1={PAD.t} x2={x} y2={PAD.t + plotH} stroke="rgba(255,255,255,0.05)" />
+            <text x={Math.min(w - 20, Math.max(PAD.l, x))} y={h - 4} fontSize="9" fill="#8a8a92">
+              {hr}:00
+            </text>
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -132,16 +154,16 @@ export function DayChart({
   headline,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const fullRef = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(340);
-  const lo = yMin ?? (points.length ? Math.min(...points.map((p) => p.v)) - 2 : 0);
-  const hi = yMax ?? (points.length ? Math.max(...points.map((p) => p.v)) + 2 : 10);
+  const lo = yMin ?? (points.length ? Math.floor(Math.min(...points.map((p) => p.v)) - 1) : 0);
+  const hi = yMax ?? (points.length ? Math.ceil(Math.max(...points.map((p) => p.v)) + 1) : 10);
   const empty = points.length < 2;
 
   useEffect(() => {
     if (!open) return;
     const measure = () => {
-      const el = document.querySelector(".chart-full");
-      if (el) setWide(Math.max(280, el.clientWidth));
+      if (fullRef.current) setWide(Math.max(280, fullRef.current.clientWidth));
     };
     measure();
     window.addEventListener("resize", measure);
@@ -174,10 +196,11 @@ export function DayChart({
               color={color}
               dayStart={dayStart}
               w={360}
-              h={72}
+              h={96}
               yMin={lo}
               yMax={hi}
               activities={activities}
+              showScale
             />
             <span className="daychart-expand">⤢</span>
           </div>
@@ -196,19 +219,19 @@ export function DayChart({
                 ✕
               </button>
             </div>
-            <p className="chart-hint">Cały dzień · 0:00–24:00</p>
-            <div className="chart-full">
+            <p className="chart-hint">Cały dzień · skala {lo}–{hi}</p>
+            <div className="chart-full" ref={fullRef}>
               <ChartSvg
                 id={`big-${title}`}
                 points={points}
                 color={color}
                 dayStart={dayStart}
                 w={wide}
-                h={220}
+                h={260}
                 yMin={lo}
                 yMax={hi}
                 activities={activities}
-                showHours
+                showScale
               />
             </div>
           </div>
