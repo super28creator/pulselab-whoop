@@ -1,26 +1,23 @@
-# PulseLab — Whoop 5
+# PulseLab — Whoop 5 lokalnie
 
-Aplikacja webowa do lokalnego odczytu tetna z Whoop 5.0.
+Aplikacja: Recovery / Strain / Sleep + live HR z opaski.
 
-## Uruchomienie lokalne
+## Live
+
+https://pulselab-whoop.vercel.app
+
+## Lokalnie
 
 ```bash
-cd web
 npm install
 npm run dev
 ```
 
-Otworz http://localhost:3000
-
-## Telefon
-
-- **Android Chrome:** przycisk "Polacz z Whoop" (Web Bluetooth)
-- **iPhone Safari:** wklej hex z nRF Connect ALBO otworz strone w [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055)
-
-## Python (PC bez BT)
+## Python (tools/)
 
 ```bash
+cd tools
 python whoop.py guide
-python whoop.py commands
-python whoop.py decode plik.txt
 ```
+
+Otwieraj w Bluefy (iPhone) albo Chrome (Android). Safari: wklej hex z nRF.

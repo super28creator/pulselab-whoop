@@ -272,7 +272,7 @@ export default function Home() {
     <div className="app">
       <header className="top">
         <div>
-          <p className="brand">PULSELAB</p>
+          <p className="brand">PULSELAB · v2</p>
           <p className="sub">
             {deviceName || "Whoop 5 lokalnie"}
             {battery != null ? ` · ${battery}%` : ""}
