@@ -626,7 +626,7 @@ export default function Home() {
           <section className="charts">
             <DayChart
               title="Poziom stresu"
-              unit="0–10 · HRV (RMSSD) + %HRR · wygładzony"
+              unit="0–10 · tętno nad RHR + %HRR + HRV"
               color="#f5a524"
               points={metrics.stress.map((p) => ({ t: p.t, v: p.level }))}
               dayStart={dayStart}
@@ -641,10 +641,12 @@ export default function Home() {
             />
             <DayChart
               title="Tętno w ciągu dnia"
-              unit="bpm"
+              unit="bpm · skala 0–300"
               color="#16ec92"
               points={metrics.hr.map((p) => ({ t: p.t, v: p.bpm }))}
               dayStart={dayStart}
+              yMin={0}
+              yMax={300}
               activities={activities}
               headline={metrics.hr.length ? `${metrics.hr.at(-1)?.bpm ?? ""} bpm` : undefined}
             />

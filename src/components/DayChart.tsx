@@ -19,7 +19,7 @@ type Props = {
 };
 
 const DAY_MS = 24 * 60 * 60_000;
-const PAD = { l: 36, r: 8, t: 8, b: 22 };
+const PAD = { l: 40, r: 8, t: 8, b: 22 };
 
 function buildPath(
   points: ChartPoint[],
@@ -44,6 +44,13 @@ function buildPath(
 
 function niceTicks(min: number, max: number, count = 5): number[] {
   const span = Math.max(max - min, 1);
+  // Prefer round steps for wide HR scales (0–300)
+  if (span >= 100) {
+    const step = span / (count - 1);
+    const out: number[] = [];
+    for (let i = 0; i < count; i++) out.push(Math.round(min + step * i));
+    return out;
+  }
   const step = span / (count - 1);
   const out: number[] = [];
   for (let i = 0; i < count; i++) out.push(Math.round((min + step * i) * 10) / 10);
