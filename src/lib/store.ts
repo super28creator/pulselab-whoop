@@ -10,8 +10,31 @@ const ACTIVITIES_KEY = "pulselab.activities.v1";
 const FAVSPORTS_KEY = "pulselab.favsports.v1";
 const SUMMARY_KEY = "pulselab.summaries.v1";
 const ACTIVE_KEY = "pulselab.active.v1";
+const SYNC_CURSOR_KEY = "pulselab.synccursor.v1";
 
 const MAX_SAMPLE_DAYS = 8;
+
+/** Timestamp (ms) of the newest historical record we've already stored. */
+export function loadSyncCursor(): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    const raw = localStorage.getItem(SYNC_CURSOR_KEY);
+    const n = raw ? Number(raw) : 0;
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function saveSyncCursor(tMs: number): void {
+  if (typeof window === "undefined" || !Number.isFinite(tMs) || tMs <= 0) return;
+  try {
+    const cur = loadSyncCursor();
+    if (tMs > cur) localStorage.setItem(SYNC_CURSOR_KEY, String(tMs));
+  } catch {
+    /* ignore */
+  }
+}
 
 export function loadProfile(): Profile {
   if (typeof window === "undefined") return { ...DEFAULT_PROFILE };

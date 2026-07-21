@@ -210,12 +210,20 @@ type WriteFn = (buf: Uint8Array, withResponse?: boolean) => Promise<void>;
  * Run historical offload. Caller must already be subscribed to FD4B notifies
  * and pass every notify chunk into onNotify.
  */
-export function createHistorySync(write: WriteFn, onSample: (s: BioSample) => void) {
+export function createHistorySync(
+  write: WriteFn,
+  onSample: (s: BioSample) => void,
+  opts: { sinceMs?: number } = {},
+) {
   const reasm = new FrameReassembler();
+  const sinceMs = opts.sinceMs ?? 0;
   let seq = 2;
-  let records = 0;
+  let records = 0; // NEW records actually stored
+  let seen = 0; // total type-47 records seen (incl. already-known)
   let chunks = 0;
   let complete = false;
+  let newestTs = 0;
+  let lastFrameAt = 0; // wall-clock of last historical frame — drives idle watchdog
   let listeners: Array<(p: SyncProgress) => void> = [];
 
   const emit = (status: string, extra?: Partial<SyncProgress>) => {
@@ -231,21 +239,29 @@ export function createHistorySync(write: WriteFn, onSample: (s: BioSample) => vo
       if (f.packetType === 47) {
         const bio = parseR24(f.record) ?? parseR24(f.payload);
         if (bio) {
-          onSample(bio);
-          records++;
-          if (records % 40 === 0) emit(`Pobieram pamięć… ${records}`);
+          seen++;
+          lastFrameAt = Date.now();
+          if (bio.t > newestTs) newestTs = bio.t;
+          // Incremental: skip records we already stored (fast repeat syncs)
+          if (!sinceMs || bio.t > sinceMs) {
+            onSample(bio);
+            records++;
+            if (records % 60 === 0) emit(`Pobieram pamięć… ${records}`);
+          } else if (seen % 400 === 0) {
+            emit("Przewijam znane dane…");
+          }
         }
       }
       // type 49 metadata
       if (f.packetType === 49 || f.packetType === 56) {
+        lastFrameAt = Date.now();
         const meta = f.cmd; // 1 start, 2 end, 3 complete (common mapping)
         if (meta === 2) {
           const token = historyEndToken(f.payload);
           if (token) {
-            // Persist first (caller already got samples via onSample), then ACK
-            await write(cmdHistoryAck(seq++ & 0xff, token), true);
+            // Without-response ACK → band pipelines next chunk faster
+            await write(cmdHistoryAck(seq++ & 0xff, token), false);
             chunks++;
-            emit(`Chunk ${chunks} OK · ${records} rekordów`);
           }
         }
         if (meta === 3) {
@@ -266,35 +282,53 @@ export function createHistorySync(write: WriteFn, onSample: (s: BioSample) => vo
   const start = async () => {
     complete = false;
     records = 0;
+    seen = 0;
     chunks = 0;
+    newestTs = 0;
+    lastFrameAt = 0;
     emit("Ustawiam zegar opaski…");
     await write(cmdSetClock(seq++ & 0xff), true);
-    await sleep(60);
-    emit("Przygotowuję łącze…");
-    await write(buildWhoop5Frame(35, seq++ & 0xff, 63, new Uint8Array([0x00])), true);
-    await sleep(80);
-    emit("Pobieram pamięć opaski…");
+    await sleep(40);
+    // Free the radio: stop IMU flood so history transfers at full speed
+    await write(buildWhoop5Frame(35, seq++ & 0xff, 63, new Uint8Array([0x00])), false);
+    await sleep(40);
+    emit(sinceMs ? "Dociągam nowe dane…" : "Pobieram pamięć opaski…");
     await write(cmdSendHistorical(seq++ & 0xff), true);
-    // Wait up to 3 min for HISTORY_COMPLETE
-    const deadline = Date.now() + 180_000;
+
+    // Hard cap, but the real end is detected by the idle watchdog below.
+    const deadline = Date.now() + 120_000;
+    const startWait = Date.now();
+    // Idle watchdog: once data started flowing, finish quickly after it stops.
+    const IDLE_MS = 2500;
+    const NO_DATA_GIVEUP_MS = 12_000;
     while (!complete && Date.now() < deadline) {
-      await sleep(250);
+      await sleep(150);
+      if (lastFrameAt) {
+        if (Date.now() - lastFrameAt > IDLE_MS) {
+          complete = true;
+          emit(`Zsynchronizowano · ${records} nowych`, { done: true });
+          break;
+        }
+      } else if (Date.now() - startWait > NO_DATA_GIVEUP_MS) {
+        break; // never received anything
+      }
     }
     if (!complete) {
-      if (records > 0) {
+      if (seen > 0) {
         complete = true;
-        emit(`Koniec (timeout) · ${records} rekordów`, { done: true });
+        emit(`Zsynchronizowano · ${records} nowych`, { done: true });
       } else {
-        emit("Brak historii / sync nie ruszył", {
+        emit("Brak nowych danych", {
           done: true,
           error:
-            "Opaska nie wysłała type47. Zostaw nRF Disconnect, połącz przez PulseLab (Bluefy/Chrome) i spróbuj ponownie. Albo opaska ma pustą pamięć.",
+            "Opaska nie wysłała historii. Rozłącz w nRF, połącz przez PulseLab (Bluefy/Chrome) i spróbuj ponownie.",
         });
       }
     }
     // Restore live streams
     await write(buildWhoop5Frame(35, seq++ & 0xff, 3, new Uint8Array([0x01])));
     await write(buildWhoop5Frame(35, seq++ & 0xff, 63, new Uint8Array([0x01])));
+    return { newestTs };
   };
 
   return {

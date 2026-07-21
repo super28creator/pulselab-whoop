@@ -20,9 +20,11 @@ import {
   loadDaySamples,
   loadProfile,
   loadRecentSamples,
+  loadSyncCursor,
   saveBaseline,
   saveDaySummary,
   saveProfile,
+  saveSyncCursor,
   stopActiveSession,
   type ActiveSession,
 } from "../lib/store";
@@ -306,14 +308,18 @@ export default function Home() {
         setBattery(pct);
       };
 
-      const sync = createHistorySync(writeCmd, (s) => {
-        appendSample(s, { history: syncingRef.current });
-        // Don't thrash React during bulk history download
-        if (!syncingRef.current && s.bpm) {
-          setBpm(s.bpm);
-          setHrSpark((h) => [...h.slice(-80), s.bpm]);
-        }
-      });
+      const sync = createHistorySync(
+        writeCmd,
+        (s) => {
+          appendSample(s, { history: syncingRef.current });
+          // Don't thrash React during bulk history download
+          if (!syncingRef.current && s.bpm) {
+            setBpm(s.bpm);
+            setHrSpark((h) => [...h.slice(-80), s.bpm]);
+          }
+        },
+        { sinceMs: loadSyncCursor() },
+      );
       sync.subscribe((p: SyncProgress) => {
         setSyncRecords(p.records);
         setSyncChunks(p.chunks);
@@ -422,12 +428,17 @@ export default function Home() {
         setSyncStatus("Pobieram pamięć opaski…");
         setSyncInfo("Synchronizuję dane z opaski…");
         beginBulkWrite();
-        void syncRef.current.start().catch((e) => {
-          syncingRef.current = false;
-          setSyncing(false);
-          endBulkWrite();
-          setSyncInfo(e instanceof Error ? e.message : String(e));
-        });
+        void syncRef.current
+          .start()
+          .then((res) => {
+            if (res?.newestTs) saveSyncCursor(res.newestTs);
+          })
+          .catch((e) => {
+            syncingRef.current = false;
+            setSyncing(false);
+            endBulkWrite();
+            setSyncInfo(e instanceof Error ? e.message : String(e));
+          });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
