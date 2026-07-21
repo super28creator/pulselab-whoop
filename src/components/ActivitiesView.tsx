@@ -16,6 +16,15 @@ import {
   type Activity,
 } from "../lib/store";
 import { localDateKey } from "../lib/metrics/types";
+import {
+  beginGpsIfNeeded,
+  endGps,
+  formatKm,
+  formatPace,
+  sportNeedsGps,
+  subscribeGps,
+  type GpsTrack,
+} from "../lib/gps";
 
 function hhmm(ms: number): string {
   return new Date(ms).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
@@ -45,6 +54,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
   const [edit, setEdit] = useState<Activity | null>(null);
   const [choice, setChoice] = useState<SportChoice | null>(null);
   const [tick, setTick] = useState(0);
+  const [gps, setGps] = useState<GpsTrack>({ points: [], distanceM: 0 });
   const isToday = selectedDate === localDateKey();
 
   useEffect(() => {
@@ -52,6 +62,14 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [active]);
+
+  useEffect(() => subscribeGps(setGps), []);
+
+  // Resume GPS if page reloaded mid-run
+  useEffect(() => {
+    const s = loadActiveSession();
+    if (s && sportNeedsGps(s.sport)) beginGpsIfNeeded(s.sport);
+  }, []);
 
   const activities = useMemo(() => loadActivities(selectedDate), [selectedDate, tick]);
 
@@ -83,16 +101,20 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
 
   const startNow = (sport: Sport) => {
     startActiveSession(sport.id);
+    beginGpsIfNeeded(sport.id);
     setActive(loadActiveSession());
     setChoice(null);
     onChange();
   };
 
   const stop = () => {
-    stopActiveSession();
+    const track = endGps();
+    stopActiveSession({ distanceM: track.distanceM });
     setActive(null);
     refresh();
   };
+
+  const showGps = !!(active && sportNeedsGps(active.sport));
 
   return (
     <div className="activities">
@@ -104,6 +126,14 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
               {sportById(active.sport).emoji} {sportById(active.sport).name}
             </p>
             <p className="act-live-timer">{elapsed(active.start, now)}</p>
+            {showGps && (
+              <p className="act-live-gps">
+                {formatKm(gps.distanceM)}
+                {gps.distanceM >= 30
+                  ? ` · ${formatPace(gps.distanceM, now - active.start)}`
+                  : " · czekam na GPS…"}
+              </p>
+            )}
           </div>
           <button type="button" className="primary stop-btn" onClick={stop}>
             Zakończ
@@ -164,6 +194,7 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
             >
               <span className="act-emoji lg">{s.emoji}</span>
               <span className="act-name">{s.name}</span>
+              {sportNeedsGps(s.id) && <span className="act-gps-tag">GPS</span>}
             </button>
             <button
               type="button"
@@ -194,6 +225,9 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
                   <span className="act-log-name">{s.name}</span>
                   <span className="act-log-time">
                     {hhmm(a.start)}–{hhmm(a.end)} · {mins} min
+                    {a.distanceM != null && a.distanceM > 0
+                      ? ` · ${formatKm(a.distanceM)}`
+                      : ""}
                   </span>
                 </button>
                 <button
@@ -237,7 +271,19 @@ export function ActivitiesView({ selectedDate, onChange }: Props) {
             <h2>
               {choice.sport.emoji} {choice.sport.name}
             </h2>
-            <button type="button" className="primary choice-btn" onClick={() => startNow(choice.sport)}>
+            {sportNeedsGps(choice.sport.id) && (
+              <p
+                className="provisional"
+                style={{ textAlign: "left", maxWidth: "none", margin: "0 0 0.75rem" }}
+              >
+                Ten sport używa GPS telefonu (dystans + tempo). Zezwól na lokalizację.
+              </p>
+            )}
+            <button
+              type="button"
+              className="primary choice-btn"
+              onClick={() => startNow(choice.sport)}
+            >
               Start teraz
             </button>
             <button
@@ -331,7 +377,12 @@ function EditActivityForm({
             Zapisz
           </button>
         </div>
-        <button type="button" className="ghost choice-btn" onClick={onClose} style={{ marginTop: "0.5rem" }}>
+        <button
+          type="button"
+          className="ghost choice-btn"
+          onClick={onClose}
+          style={{ marginTop: "0.5rem" }}
+        >
           Anuluj
         </button>
       </div>
@@ -376,7 +427,10 @@ function ManualPastForm({
         <h2>
           {sport.emoji} {sport.name}
         </h2>
-        <p className="provisional" style={{ textAlign: "left", maxWidth: "none", margin: "0 0 0.75rem" }}>
+        <p
+          className="provisional"
+          style={{ textAlign: "left", maxWidth: "none", margin: "0 0 0.75rem" }}
+        >
           Dodaj aktywność z wcześniejszych godzin (gdy zapomniałeś włączyć).
         </p>
         <label>

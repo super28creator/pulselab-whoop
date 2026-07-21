@@ -27,6 +27,16 @@ import {
 import { CMD, UUID } from "../lib/whoop";
 import { createHistorySync, type SyncProgress } from "../lib/whoopSync";
 import { sportById } from "../lib/sports";
+import { batteryFrom2a19, batteryFromWhoopFrame } from "../lib/battery";
+import {
+  beginGpsIfNeeded,
+  endGps,
+  formatKm,
+  formatPace,
+  sportNeedsGps,
+  subscribeGps,
+  type GpsTrack,
+} from "../lib/gps";
 
 type Tab = "today" | "calendar" | "activities";
 
@@ -76,9 +86,12 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [active, setActive] = useState<ActiveSession | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+  const [gps, setGps] = useState<GpsTrack>({ points: [], distanceM: 0 });
 
   const deviceRef = useRef<BluetoothDevice | null>(null);
   const cmdCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const batCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const batteryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
   const lastRecomputeRef = useRef(0);
   const autoSyncedRef = useRef(false);
@@ -91,8 +104,12 @@ export default function Home() {
     setBleOk(typeof navigator !== "undefined" && "bluetooth" in navigator);
     setIosHint(/iPhone|iPad|iPod/i.test(navigator.userAgent));
     setProfile(loadProfile());
-    setActive(loadActiveSession());
+    const s = loadActiveSession();
+    setActive(s);
+    if (s && sportNeedsGps(s.sport)) beginGpsIfNeeded(s.sport);
   }, []);
+
+  useEffect(() => subscribeGps(setGps), []);
 
   // Timer only for live banner — NOT for charts/metrics (was causing lag)
   useEffect(() => {
@@ -194,7 +211,16 @@ export default function Home() {
     [ingest],
   );
 
+  const clearBatteryPoll = useCallback(() => {
+    if (batteryPollRef.current) {
+      clearInterval(batteryPollRef.current);
+      batteryPollRef.current = null;
+    }
+    batCharRef.current = null;
+  }, []);
+
   const disconnect = useCallback(() => {
+    clearBatteryPoll();
     try {
       deviceRef.current?.gatt?.disconnect();
     } catch {
@@ -207,7 +233,7 @@ export default function Home() {
     setStatus("idle");
     setDeviceName("");
     setSyncing(false);
-  }, []);
+  }, [clearBatteryPoll]);
 
   const connect = useCallback(async () => {
     setError("");
@@ -226,6 +252,7 @@ export default function Home() {
       deviceRef.current = device;
       setDeviceName(device.name || "WHOOP");
       device.addEventListener("gattserverdisconnected", () => {
+        clearBatteryPoll();
         setStatus("idle");
         setSyncing(false);
       });
@@ -243,6 +270,11 @@ export default function Home() {
             await ch.writeValue(data);
           }
         }
+      };
+
+      const applyBattery = (pct: number | null) => {
+        if (pct == null || pct < 0 || pct > 100) return;
+        setBattery(pct);
       };
 
       const sync = createHistorySync(writeCmd, (s) => {
@@ -272,6 +304,8 @@ export default function Home() {
           const t = ev.target as BluetoothRemoteGATTCharacteristic;
           if (!t.value) return;
           const bytes = new Uint8Array(t.value.buffer, t.value.byteOffset, t.value.byteLength);
+          const bat = batteryFromWhoopFrame(bytes);
+          if (bat != null) applyBattery(bat);
           void sync.onNotify(bytes);
         };
         for (const id of [UUID.dataNotify, UUID.eventNotify, UUID.cmdNotify] as const) {
@@ -288,16 +322,50 @@ export default function Home() {
         await writeCmd(CMD.clientHello());
         await new Promise((r) => setTimeout(r, 300));
         await writeCmd(CMD.realtimeHrOn());
+        try {
+          await writeCmd(CMD.getBattery());
+        } catch {
+          /* optional */
+        }
       } catch {
         /* custom service needs bond; 2A37 may still work */
       }
+
+      // Battery: notify + poll (Whoop 2A19 often only updates on read)
+      clearBatteryPoll();
       try {
         const batSvc = await server.getPrimaryService(UUID.batteryService);
         const batChar = await batSvc.getCharacteristic(UUID.batteryChar);
-        setBattery((await batChar.readValue()).getUint8(0));
+        batCharRef.current = batChar;
+        applyBattery(batteryFrom2a19(await batChar.readValue()));
+        try {
+          await batChar.startNotifications();
+          batChar.addEventListener("characteristicvaluechanged", (ev) => {
+            const t = ev.target as BluetoothRemoteGATTCharacteristic;
+            if (t.value) applyBattery(batteryFrom2a19(t.value));
+          });
+        } catch {
+          /* some stacks don't notify 2A19 */
+        }
+        batteryPollRef.current = setInterval(() => {
+          void (async () => {
+            try {
+              const ch = batCharRef.current;
+              if (ch) applyBattery(batteryFrom2a19(await ch.readValue()));
+            } catch {
+              /* disconnected */
+            }
+            try {
+              if (cmdCharRef.current) await writeCmd(CMD.getBattery());
+            } catch {
+              /* optional */
+            }
+          })();
+        }, 30_000);
       } catch {
         /* optional */
       }
+
       const hrSvc = await server.getPrimaryService(UUID.hrService);
       const hrChar = await hrSvc.getCharacteristic(UUID.hrChar);
       await hrChar.startNotifications();
@@ -318,7 +386,7 @@ export default function Home() {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
-  }, [iosHint, onHr, recompute]);
+  }, [iosHint, onHr, recompute, clearBatteryPoll]);
 
   const saveProf = () => {
     saveProfile(profile);
@@ -359,7 +427,8 @@ export default function Home() {
   })();
 
   const endLive = () => {
-    stopActiveSession();
+    const track = endGps();
+    stopActiveSession({ distanceM: track.distanceM });
     setActive(null);
     recompute();
   };
@@ -403,6 +472,14 @@ export default function Home() {
                 <p className="live-workout-name">
                   {sportById(active.sport).emoji} {sportById(active.sport).name} · {liveElapsed}
                 </p>
+                {sportNeedsGps(active.sport) && (
+                  <p className="act-live-gps">
+                    {formatKm(gps.distanceM)}
+                    {gps.distanceM >= 30
+                      ? ` · ${formatPace(gps.distanceM, nowTick - active.start)}`
+                      : " · czekam na GPS…"}
+                  </p>
+                )}
               </div>
               <button type="button" className="primary stop-btn" onClick={endLive}>
                 Zakończ

@@ -123,6 +123,8 @@ export type Activity = {
   end: number;
   manual: boolean;
   note?: string;
+  /** GPS distance in meters (running / outdoor). */
+  distanceM?: number;
 };
 
 /** Live session — started but not yet stopped. */
@@ -188,15 +190,20 @@ export function startActiveSession(sport: string): ActiveSession {
   return session;
 }
 
-export function stopActiveSession(): Activity | null {
+export function stopActiveSession(extra?: { distanceM?: number }): Activity | null {
   const session = loadActiveSession();
   if (!session) return null;
   localStorage.removeItem(ACTIVE_KEY);
+  const dist =
+    extra?.distanceM != null && extra.distanceM > 5
+      ? Math.round(extra.distanceM)
+      : undefined;
   return addActivity({
     sport: session.sport,
     start: session.start,
     end: Date.now(),
     manual: false,
+    distanceM: dist,
   });
 }
 
