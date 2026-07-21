@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScoreRing, recoveryColor, useSparkPath } from "../components/ScoreRing";
 import { DayChart } from "../components/DayChart";
-import { CalendarView } from "../components/CalendarView";
-import { ActivitiesView } from "../components/ActivitiesView";
+import { LoadingScreen } from "../components/LoadingScreen";
 import { computeRecovery, emptyBaseline, updateBaseline } from "../lib/metrics/recovery";
 import { estimateRestingHr, computeSleepPerformance } from "../lib/metrics/sleep";
 import { computeStrain } from "../lib/metrics/strain";
@@ -12,6 +12,8 @@ import { stressSeries, averageStress, hrSeries, currentStress, stressBandLabel }
 import { Profile, HrSample, localDateKey, DEFAULT_PROFILE } from "../lib/metrics/types";
 import {
   appendSample,
+  beginBulkWrite,
+  endBulkWrite,
   loadActiveSession,
   loadActivities,
   loadBaseline,
@@ -37,6 +39,19 @@ import {
   subscribeGps,
   type GpsTrack,
 } from "../lib/gps";
+
+const CalendarView = dynamic(
+  () => import("../components/CalendarView").then((m) => ({ default: m.CalendarView })),
+  { ssr: false, loading: () => <TabSkeleton /> },
+);
+const ActivitiesView = dynamic(
+  () => import("../components/ActivitiesView").then((m) => ({ default: m.ActivitiesView })),
+  { ssr: false, loading: () => <TabSkeleton /> },
+);
+
+function TabSkeleton() {
+  return <div className="tab-skel" aria-hidden />;
+}
 
 type Tab = "today" | "calendar" | "activities";
 
@@ -84,6 +99,9 @@ export default function Home() {
   const [tick, setTick] = useState(0);
   const [syncInfo, setSyncInfo] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [syncRecords, setSyncRecords] = useState(0);
+  const [syncChunks, setSyncChunks] = useState(0);
+  const [syncStatus, setSyncStatus] = useState("Pobieram pamięć opaski…");
   const [active, setActive] = useState<ActiveSession | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
   const [gps, setGps] = useState<GpsTrack>({ points: [], distanceM: 0 });
@@ -95,10 +113,13 @@ export default function Home() {
   const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
   const lastRecomputeRef = useRef(0);
   const autoSyncedRef = useRef(false);
+  const syncingRef = useRef(false);
   const path = useSparkPath(hrSpark, 140, 40);
 
   const isToday = selectedDate === localDateKey();
-  const recompute = useCallback(() => setTick((t) => t + 1), []);
+  const recompute = useCallback(() => {
+    startTransition(() => setTick((t) => t + 1));
+  }, []);
 
   useEffect(() => {
     setBleOk(typeof navigator !== "undefined" && "bluetooth" in navigator);
@@ -107,7 +128,15 @@ export default function Home() {
     const s = loadActiveSession();
     setActive(s);
     if (s && sportNeedsGps(s.sport)) beginGpsIfNeeded(s.sport);
-  }, []);
+    // Warm sample cache + first metrics paint, then hide HTML splash
+    void loadDaySamples();
+    recompute();
+    const hide = () => {
+      document.getElementById("boot-splash")?.classList.add("gone");
+      window.setTimeout(() => document.getElementById("boot-splash")?.remove(), 400);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(hide));
+  }, [recompute]);
 
   useEffect(() => subscribeGps(setGps), []);
 
@@ -278,22 +307,33 @@ export default function Home() {
       };
 
       const sync = createHistorySync(writeCmd, (s) => {
-        appendSample(s);
-        if (s.bpm) {
+        appendSample(s, { history: syncingRef.current });
+        // Don't thrash React during bulk history download
+        if (!syncingRef.current && s.bpm) {
           setBpm(s.bpm);
           setHrSpark((h) => [...h.slice(-80), s.bpm]);
         }
       });
       sync.subscribe((p: SyncProgress) => {
-        if (p.error) setSyncInfo(p.error);
-        else if (!p.done) setSyncInfo(p.status);
-        else {
+        setSyncRecords(p.records);
+        setSyncChunks(p.chunks);
+        if (!p.done) {
+          setSyncStatus(p.status);
+          setSyncInfo(p.status);
+          return;
+        }
+        syncingRef.current = false;
+        setSyncing(false);
+        endBulkWrite();
+        lastRecomputeRef.current = Date.now();
+        recompute();
+        if (p.error) {
+          setSyncInfo(p.error);
+          setSyncStatus(p.error);
+        } else {
           setSyncInfo(p.records > 0 ? `Zsynchronizowano ${p.records} rekordów` : "");
-          setSyncing(false);
-          lastRecomputeRef.current = Date.now();
-          recompute();
-          // Clear success message after a few seconds
-          setTimeout(() => setSyncInfo(""), 4000);
+          setSyncStatus(p.records > 0 ? "Gotowe" : "Brak nowych danych");
+          setTimeout(() => setSyncInfo(""), 3500);
         }
       });
       syncRef.current = sync;
@@ -375,10 +415,17 @@ export default function Home() {
       // Auto history sync once per connection — no manual button needed
       if (cmdCharRef.current && syncRef.current && !autoSyncedRef.current) {
         autoSyncedRef.current = true;
+        syncingRef.current = true;
         setSyncing(true);
+        setSyncRecords(0);
+        setSyncChunks(0);
+        setSyncStatus("Pobieram pamięć opaski…");
         setSyncInfo("Synchronizuję dane z opaski…");
+        beginBulkWrite();
         void syncRef.current.start().catch((e) => {
+          syncingRef.current = false;
           setSyncing(false);
+          endBulkWrite();
           setSyncInfo(e instanceof Error ? e.message : String(e));
         });
       }
@@ -435,6 +482,16 @@ export default function Home() {
 
   return (
     <div className="app">
+      {syncing && (
+        <LoadingScreen
+          mode="sync"
+          title="PULSELAB"
+          subtitle={syncStatus}
+          records={syncRecords}
+          chunks={syncChunks}
+        />
+      )}
+
       <header className="top">
         <div>
           <p className="brand">PULSELAB</p>

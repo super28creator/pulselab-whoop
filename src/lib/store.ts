@@ -47,14 +47,25 @@ export function saveBaseline(b: Baseline): void {
 
 type StoreShape = Record<string, HrSample[]>;
 
-function readAll(): StoreShape {
+/** In-memory cache — avoids JSON.parse on every live HR tick / sync packet. */
+let memCache: StoreShape | null = null;
+let bulkDepth = 0;
+let bulkSinceFlush = 0;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function readAllFromDisk(): StoreShape {
   if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(SAMPLES_KEY);
-    return raw ? JSON.parse(raw) : {};
+    return raw ? (JSON.parse(raw) as StoreShape) : {};
   } catch {
     return {};
   }
+}
+
+function ensureCache(): StoreShape {
+  if (!memCache) memCache = readAllFromDisk();
+  return memCache;
 }
 
 function writeAll(data: StoreShape): void {
@@ -65,7 +76,6 @@ function writeAll(data: StoreShape): void {
   try {
     localStorage.setItem(SAMPLES_KEY, JSON.stringify(data));
   } catch {
-    // Quota — drop oldest and retry once
     const k = Object.keys(data).sort();
     if (k.length) {
       delete data[k[0]!];
@@ -78,32 +88,78 @@ function writeAll(data: StoreShape): void {
   }
 }
 
-export function appendSample(sample: HrSample): void {
-  const all = readAll();
+function flushNow(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (!memCache) return;
+  writeAll(memCache);
+  bulkSinceFlush = 0;
+}
+
+function scheduleFlush(): void {
+  if (bulkDepth > 0) {
+    bulkSinceFlush++;
+    // Periodic checkpoint so a crash mid-sync doesn't lose everything
+    if (bulkSinceFlush >= 200) flushNow();
+    return;
+  }
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushNow();
+  }, 600);
+}
+
+/** Call around history sync — batches localStorage writes. */
+export function beginBulkWrite(): void {
+  ensureCache();
+  bulkDepth++;
+}
+
+export function endBulkWrite(): void {
+  bulkDepth = Math.max(0, bulkDepth - 1);
+  if (bulkDepth === 0) flushNow();
+}
+
+export function flushSamplesNow(): void {
+  flushNow();
+}
+
+export function appendSample(sample: HrSample, opts?: { history?: boolean }): void {
+  const all = ensureCache();
   const key = localDateKey(sample.t);
   const list = all[key] ?? [];
   const last = list[list.length - 1];
   const rich = !!(sample.rrMs?.length || sample.accelG || sample.skinTempRaw);
-  if (last && sample.t - last.t < 5000 && !rich) {
+  // History sync: keep ~1 sample / 12s unless RR/accel/temp (faster + smaller store)
+  const minGap = opts?.history ? 12_000 : 5_000;
+  if (last && sample.t - last.t < minGap && !rich) {
     list[list.length - 1] = sample;
   } else {
     list.push(sample);
   }
-  if (list.length > 20_000) list.splice(0, list.length - 20_000);
+  if (list.length > 12_000) list.splice(0, list.length - 12_000);
   all[key] = list;
-  writeAll(all);
+  scheduleFlush();
 }
 
 export function appendSamples(samples: HrSample[]): void {
-  for (const s of samples) appendSample(s);
+  beginBulkWrite();
+  try {
+    for (const s of samples) appendSample(s);
+  } finally {
+    endBulkWrite();
+  }
 }
 
 export function loadDaySamples(date = localDateKey()): HrSample[] {
-  return readAll()[date] ?? [];
+  return ensureCache()[date] ?? [];
 }
 
 export function loadRecentSamples(days = 2): HrSample[] {
-  const all = readAll();
+  const all = ensureCache();
   const out: HrSample[] = [];
   for (let i = 0; i < days; i++) {
     const d = new Date();

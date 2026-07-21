@@ -233,7 +233,7 @@ export function createHistorySync(write: WriteFn, onSample: (s: BioSample) => vo
         if (bio) {
           onSample(bio);
           records++;
-          if (records % 25 === 0) emit(`Pobieram… ${records} rekordów`);
+          if (records % 40 === 0) emit(`Pobieram pamięć… ${records}`);
         }
       }
       // type 49 metadata
@@ -269,16 +269,16 @@ export function createHistorySync(write: WriteFn, onSample: (s: BioSample) => vo
     chunks = 0;
     emit("Ustawiam zegar opaski…");
     await write(cmdSetClock(seq++ & 0xff), true);
-    await sleep(200);
-    emit("Wyłączam IMU (żeby zwolnić łącze)…");
+    await sleep(60);
+    emit("Przygotowuję łącze…");
     await write(buildWhoop5Frame(35, seq++ & 0xff, 63, new Uint8Array([0x00])), true);
-    await sleep(300);
-    emit("Start pobierania historii…");
+    await sleep(80);
+    emit("Pobieram pamięć opaski…");
     await write(cmdSendHistorical(seq++ & 0xff), true);
     // Wait up to 3 min for HISTORY_COMPLETE
     const deadline = Date.now() + 180_000;
     while (!complete && Date.now() < deadline) {
-      await sleep(500);
+      await sleep(250);
     }
     if (!complete) {
       if (records > 0) {
