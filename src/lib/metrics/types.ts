@@ -14,6 +14,12 @@ export type HrSample = {
   t: number; // ms epoch
   bpm: number;
   rrMs?: number[];
+  /** Gravity vector from historical R24 */
+  accelG?: [number, number, number];
+  /** Raw skin-temp ADC (relative, not °C) */
+  skinTempRaw?: number;
+  /** Approx motion magnitude in g (live IMU) */
+  motion?: number;
 };
 
 export type DayBucket = {

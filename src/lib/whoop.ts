@@ -68,7 +68,11 @@ export const CMD = {
   clientHello: () => buildWhoop5Frame(35, 1, 145, new Uint8Array([0x01])),
   realtimeHrOn: () => buildWhoop5Frame(35, 1, 3, new Uint8Array([0x01])),
   realtimeHrOff: () => buildWhoop5Frame(35, 1, 3, new Uint8Array([0x00])),
+  /** Type-43 IMU/optical flood — accel for sleep/motion */
+  imuRawOn: () => buildWhoop5Frame(35, 1, 63, new Uint8Array([0x01])),
+  imuRawOff: () => buildWhoop5Frame(35, 1, 63, new Uint8Array([0x00])),
   getBattery: () => buildWhoop5Frame(35, 1, 26, new Uint8Array([0x00])),
+  historicalStart: () => buildWhoop5Frame(35, 1, 22, new Uint8Array([0x00])),
 };
 
 export type HrSample = {

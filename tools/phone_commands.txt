@@ -1,12 +1,21 @@
-# nRF Connect iOS - jesli Write ODRZUCA, uzyj WERSJI BEZ SPACJI
-# Typ danych: HEX (nie Text, nie UTF-8)
-# Preferuj: Write Without Response (jesli jest wybor)
+# nRF Connect — HEX (bez spacji jesli iOS odmawia Write)
+# FD4B0001 → FD4B0002 → Write
+# Najpierw Notify ON: 2A37, FD4B0003, FD4B0004, FD4B0005
 
-# 1) Client Hello
+# 1) Client Hello (bond / start)
 AA0108000001E67123019101363E5C8D
 
-# 2) Realtime HR ON
+# 2) Realtime HR ON (type 40)
 AA0108000001E67123010301AED62BCE
 
-# 3) Bateria (test - krotki)
+# 3) IMU raw ON (type 43 — akcelerometr, duze pakiety)
+AA0108000001E67123013F0151AFD8BD
+
+# 4) Bateria
 AA0108000001E67123011A00204F2C22
+
+# 5) IMU OFF (po tescie — bateria)
+AA0108000001E67123013F00C79FDFCA
+
+# 6) Realtime HR OFF
+AA0108000001E6712301030038E62CB9

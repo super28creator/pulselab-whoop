@@ -67,8 +67,9 @@ COMMAND_NAMES = {
     26: "GET_BATTERY_LEVEL",
     34: "GET_DATA_RANGE",
     35: "GET_HELLO_HARVARD",
-    63: "SEND_R10_R11_REALTIME",
+    63: "SEND_R10_R11_REALTIME",  # type-43 IMU/optical flood on/off
     76: "GET_ADVERTISING_NAME",
+    82: "STOP_RAW_DATA",
     98: "GET_EXTENDED_BATTERY_INFO",
     145: "CLIENT_HELLO",  # Whoop 5 static hello (0x91)
 }
@@ -106,8 +107,12 @@ NRF_COMMANDS = {
     "get_battery": build_whoop5_frame(35, 1, 26, b"\x00"),
     "realtime_hr_on": build_whoop5_frame(35, 1, 3, b"\x01"),
     "realtime_hr_off": build_whoop5_frame(35, 1, 3, b"\x00"),
+    # Live IMU + raw optical (~2 pkt/s, duże) — accel do snu/ruchu
+    "imu_raw_on": build_whoop5_frame(35, 1, 63, b"\x01"),
+    "imu_raw_off": build_whoop5_frame(35, 1, 63, b"\x00"),
     "get_version": build_whoop5_frame(35, 1, 7, b"\x00"),
     "get_data_range": build_whoop5_frame(35, 1, 34, b"\x00"),
+    # Historia 1 Hz: HR+RR+accel+temp (wymaga ack pętli — w nRF tylko próbka)
     "historical_start": build_whoop5_frame(35, 1, 22, b"\x00"),
 }
 
@@ -258,6 +263,20 @@ def parse_whoop5_frame(data: bytes) -> Optional[ParsedFrame]:
             parts.append(f"tetno~{hr:.1f} bpm")
         if rr:
             parts.append(f"RR={rr} ms")
+    elif pkt_type == 43:
+        try:
+            from whoop_sensors import parse_imu_type43_payload
+
+            imu = parse_imu_type43_payload(payload)
+            if imu:
+                if imu.hr is not None:
+                    hr = float(imu.hr)
+                    parts.append(f"tetno={imu.hr} bpm")
+                parts.append(f"IMU motion~{imu.motion_rms:.3f}g n={len(imu.accel_xyz)}")
+            else:
+                parts.append(f"RAW_IMU {len(payload)}B")
+        except Exception:
+            parts.append(f"RAW_IMU {len(payload)}B")
     elif pkt_type == 48:
         event_name = EVENT_NAMES.get(cmd, f"event_{cmd}")
         parts.append(event_name)
@@ -265,10 +284,31 @@ def parse_whoop5_frame(data: bytes) -> Optional[ParsedFrame]:
         if "battery_pct" in extras:
             battery = extras["battery_pct"]
             parts.append(f"bateria={battery:.1f}%")
+        if cmd == 17 and payload:
+            # TEMPERATURE_LEVEL — best-effort u16 raw
+            for off in (0, 1, 2, 4):
+                if off + 1 < len(payload):
+                    v = struct.unpack_from("<H", payload, off)[0]
+                    if 500 < v < 50000:
+                        parts.append(f"tempRaw={v}")
+                        break
     elif pkt_type in (49, 56):
         parts.append("metadata/sync")
     elif pkt_type == 47:
-        parts.append(f"historical {len(payload)}B")
+        try:
+            from whoop_sensors import parse_r24, summarize_biometric
+
+            bio = parse_r24(record) or parse_r24(payload)
+            if bio:
+                hr = float(bio.hr) if bio.hr else None
+                rr = [float(x) for x in bio.rr_ms] or None
+                parts.append(summarize_biometric(bio))
+            else:
+                parts.append(f"historical {len(payload)}B")
+        except Exception:
+            parts.append(f"historical {len(payload)}B")
+    elif pkt_type == 51:
+        parts.append(f"REALTIME_IMU {len(payload)}B")
 
     if not crc16_ok or not crc32_ok:
         parts.append(f"CRC16={'OK' if crc16_ok else 'BAD'}")

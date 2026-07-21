@@ -15,8 +15,16 @@ event_notify= fd4b0004-cce1-4033-93ce-002d5875f58a
 data_notify = fd4b0005-cce1-4033-93ce-002d5875f58a
 diagnostics = fd4b0007-cce1-4033-93ce-002d5875f58a
 
-[service.standard]
-heart_rate_service = 180D
-heart_rate_char    = 2A37
-battery_service    = 180F
-battery_char       = 2A19
+[streams]
+# Live
+2A37 / type40 = HR (+ RR gdy pakiet ma intervals)
+type43 + cmd63 SEND_R10_R11_REALTIME = IMU accel (~52Hz) — imu_raw_on
+event17 TEMPERATURE_LEVEL = temp (rzadkie)
+
+# Full day journal (Sleep/Recovery gold)
+type47 HISTORICAL = 1Hz: HR + RR + accel(g) + skinTempRaw + PPG
+# Requires ACK sync loop — nRF alone cannot drain full history
+
+[commands]
+# python whoop.py commands  OR  phone_commands.txt
+client_hello, realtime_hr_on, imu_raw_on, historical_start, …

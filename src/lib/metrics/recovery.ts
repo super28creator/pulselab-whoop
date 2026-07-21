@@ -85,28 +85,40 @@ export function computeRecovery(
   baseline: Baseline,
 ): RecoveryResult {
   const hrv = overnightHrv(samples, restingHr);
-  const provisional = baseline.nights < 4 || hrv == null || sleep.provisional;
+  // Recovery needs a real night + personal baseline — never invent a score from 2h of wear
+  const provisional =
+    baseline.nights < 4 || hrv == null || sleep.provisional || sleep.hoursAsleep < 5.5;
 
-  const hrvVal = hrv ?? baseline.hrvMean;
-  const hrvZ = robustZ(hrvVal, baseline.hrvMean, baseline.hrvMad, false);
+  if (provisional) {
+    return {
+      recovery: 0,
+      band: "yellow",
+      hrvMs: hrv != null ? round(hrv, 1) : null,
+      restingHr: round(restingHr, 0),
+      sleepPerformance: sleep.performance,
+      provisional: true,
+      drivers: { hrvZ: 0, rhrZ: 0, sleepZ: 0 },
+    };
+  }
+
+  const hrvZ = robustZ(hrv!, baseline.hrvMean, baseline.hrvMad, false);
   const rhrZ = robustZ(restingHr, baseline.rhrMean, baseline.rhrMad, true);
   const sleepZ = (sleep.performance / 100 - 0.85) / 0.12;
 
-  // Weights: HRV 60%, RHR 20%, Sleep 15%, (resp reserved 5% → fold into sleep)
+  // Weights: HRV 60%, RHR 20%, Sleep 20%
   const z = 0.6 * hrvZ + 0.2 * rhrZ + 0.2 * sleepZ;
   const k = 1.6;
   const z0 = -0.2;
   const recovery = clamp(100 / (1 + Math.exp(-k * (z - z0))), 0, 100);
-
   const band = recovery < 34 ? "red" : recovery < 67 ? "yellow" : "green";
 
   return {
     recovery: round(recovery, 0),
     band,
-    hrvMs: hrv != null ? round(hrv, 1) : null,
+    hrvMs: round(hrv!, 1),
     restingHr: round(restingHr, 0),
     sleepPerformance: sleep.performance,
-    provisional,
+    provisional: false,
     drivers: {
       hrvZ: round(hrvZ, 2),
       rhrZ: round(rhrZ, 2),

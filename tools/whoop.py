@@ -73,17 +73,18 @@ def cmd_commands(_args: argparse.Namespace) -> None:
     print("=== Whoop 5.0 - komendy do nRF Connect ===\n")
     print("1. CONNECT do WHOOP 5AGxxxxxxx")
     print("2. Otworz: FD4B0001 -> charakterystyke FD4B0002")
-    print("3. Write -> Byte Array -> wklej JEDNA z ponizszych linii")
-    print("4. Potem wlacz Notify (dzwonek) na: 2A37, FD4B0003, FD4B0004, FD4B0005\n")
+    print("3. Write -> Byte Array / HEX -> wklej JEDNA z ponizszych linii")
+    print("4. Notify (dzwonek): 2A37 + FD4B0003 + FD4B0004 + FD4B0005\n")
     print("-" * 60)
     order = [
-        ("client_hello", "1) START - Client Hello (obowiazkowy na 5.0)"),
-        ("get_battery", "2) Bateria"),
-        ("realtime_hr_on", "3) Wlacz strumien tetna (REALTIME_HR)"),
-        ("get_version", "4) Wersja firmware"),
-        ("get_data_range", "5) Zakres zapisanych danych"),
-        ("historical_start", "6) Pobierz historie (opcjonalnie)"),
-        ("realtime_hr_off", "7) Wylacz strumien tetna"),
+        ("client_hello", "1) START - Client Hello (wymagane / bond)"),
+        ("realtime_hr_on", "2) Live HR stream (type 40) — tetno + czasem RR"),
+        ("imu_raw_on", "3) Live IMU ON (type 43) — akcelerometr ~52 Hz"),
+        ("get_battery", "4) Bateria"),
+        ("get_data_range", "5) Zakres historii w pamieci opaski"),
+        ("historical_start", "6) Start historii 1Hz (HR+RR+accel+temp) — w nRF tylko sample"),
+        ("imu_raw_off", "7) IMU OFF (oszczedza baterie)"),
+        ("realtime_hr_off", "8) Live HR OFF"),
     ]
     for key, label in order:
         frame = NRF_COMMANDS[key]
@@ -91,39 +92,67 @@ def cmd_commands(_args: argparse.Namespace) -> None:
         print(f"  {frame_hex(frame)}")
         print(f"  (bez spacji: {frame.hex().upper()})")
     print("\n" + "-" * 60)
-    print("UUID do Notify:")
-    print("  2A37     = standardowe tetno (najlatwiejsze)")
-    print("  FD4B0005 = glowny strumien Whoop")
-    print("  FD4B0004 = eventy (duzo pakietow - OK)")
-    print("  FD4B0003 = odpowiedzi na komendy")
+    print("Co gdzie jest:")
+    print("  2A37 / type40  -> HR (+ RR jesli flaga)")
+    print("  type43 IMU     -> akcelerometr (sen / ruch)")
+    print("  type47 hist    -> pelna sekunda: HR+RR+accel+skinTemp")
+    print("  event 17       -> TEMPERATURE_LEVEL (rzadkie)")
 
 
 def cmd_guide(_args: argparse.Namespace) -> None:
     print(
         """
-=== Instrukcja: Whoop 5.0 bez Bluetooth na PC ===
+=== Jak zebrac WSZYSTKO (HR + HRV/RR + accel + temp) ===
 
-TELEFON (nRF Connect)
-  1. Zamknij oficjalna apke Whoop (1 polaczenie BLE naraz).
-  2. nRF Connect -> Scanner -> WHOOP 5AG... -> CONNECT.
-  3. Lista serwisow (ikona listy) - NIE log z -dBm (to tylko RSSI).
-  4. python whoop.py commands  -> skopiuj hex Client Hello.
-  5. FD4B0001 -> FD4B0002 -> Write -> Byte Array -> wklej Client Hello.
-  6. Potem Write: realtime_hr_on (z listy commands).
-  7. Wlacz dzwonek Notify na:
-       - Heart Rate -> 2A37
-       - FD4B0005 (i opcjonalnie 0003, 0004)
-  8. Porusz nadgarstkiem - przy 2A37 powinny pojawic sie krotkie hex.
-  9. Export log / Copy Last Read -> plik tekstowy na PC.
+OFICJALNA APKA WHOOP tego nie oddaje przez API — dane sa w prywatnym BLE.
+My musimy: polaczyc → bonded link → wlaczyc strumienie → zdekodowac bajty.
 
-PC
-  python whoop.py decode twoj_log.txt
-  python whoop.py decode twoj_log.txt -o wynik.csv
-  python whoop.py decode --paste
+--------------------------------------------------
+A) LIVE (telefon, nRF Connect) — szybki test
+--------------------------------------------------
+  1. Zamknij apke Whoop.
+  2. nRF → CONNECT do WHOOP 5AG...
+  3. Write na FD4B0002 (kolejno, HEX bez spacji jesli iOS odmawia):
+       Client Hello  →  python whoop.py commands  (pkt 1)
+       realtime_hr_on → pkt 2
+       imu_raw_on     → pkt 3
+  4. Notify ON: 2A37, FD4B0003, FD4B0004, FD4B0005
+  5. Porusz reka — na 0005 powinny isc DUZE pakiety (type 43 = IMU).
+  6. Export log → PC:
+       python whoop.py decode twoj_log.txt
 
-Wykres RSSI / wartosci typu "-61 dBm" / "52 ms" to NIE tetno.
-Tetno = krotki hex przy 2A37 (np. 00 4A = 74 bpm) albo ramki AA 01 ...
-""".strip()
+  Oczekiwane:
+    2A37 / type40  = tetno (+ RR gdy pakiet dluzszy)
+    type43         = akcelerometr (motion)
+    event 17       = temperatura (jesli przyjdzie)
+
+--------------------------------------------------
+B) PELNY DZIENNIK (to czego potrzebuje Sleep/Recovery)
+--------------------------------------------------
+  Opaska ZAPISUJE ~1 Hz lokalnie (14 dni): HR, RR, accel, skinTempRaw.
+  To jest type 47 HISTORICAL — ZLOTO.
+
+  Problem: pelny sync wymaga petli ACK (apka potwierdza kazdy chunk).
+  nRF Connect tego nie zrobi automatycznie — tylko sample / debug.
+
+  Docelowo PulseLab (albo skrypt na telefonie) musi:
+    Client Hello → SET_CLOCK → SEND_HISTORICAL_DATA →
+    czytac type47 → decode R24 → ACK metadata → trim.
+
+  Na teraz: nos cala noc z wlaczonej oficjalnej apki ALBO z naszym
+  polaczeniem live; rano sciagamy historie gdy sync w appce bedzie gotowy.
+
+--------------------------------------------------
+C) Co juz mamy vs czego brak
+--------------------------------------------------
+  MAMY:     HR z 2A37, bateria, ramki Whoop5, komendy, dekoder R24/IMU
+  BRAKUJE:  automatyczny sync historyczny + pairing w appce (accel/temp)
+  WEB BLE:  na iPhone bond bywa kapryśny (Bluefy); Android Chrome latwiej.
+
+PC decode:
+  python whoop.py decode plik.txt
+  python whoop.py commands
+"""
     )
 
 

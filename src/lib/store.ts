@@ -62,16 +62,20 @@ export function appendSample(sample: HrSample): void {
   const key = localDateKey(sample.t);
   const list = all[key] ?? [];
   const last = list[list.length - 1];
-  // Downsample: keep ~every 5s unless RR present
-  if (last && sample.t - last.t < 5000 && !sample.rrMs?.length) {
+  // Downsample: keep ~every 5s unless RR / accel present
+  const rich = !!(sample.rrMs?.length || sample.accelG || sample.skinTempRaw);
+  if (last && sample.t - last.t < 5000 && !rich) {
     list[list.length - 1] = sample;
   } else {
     list.push(sample);
   }
-  // Cap per day
   if (list.length > 20_000) list.splice(0, list.length - 20_000);
   all[key] = list;
   writeAll(all);
+}
+
+export function appendSamples(samples: HrSample[]): void {
+  for (const s of samples) appendSample(s);
 }
 
 export function loadDaySamples(date = localDateKey()): HrSample[] {

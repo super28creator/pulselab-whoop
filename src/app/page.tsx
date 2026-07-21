@@ -16,55 +16,8 @@ import {
   saveBaseline,
   saveProfile,
 } from "../lib/store";
-
-const UUID = {
-  customService: "fd4b0001-cce1-4033-93ce-002d5875f58a",
-  cmdWrite: "fd4b0002-cce1-4033-93ce-002d5875f58a",
-  hrService: "0000180d-0000-1000-8000-00805f9b34fb",
-  hrChar: "00002a37-0000-1000-8000-00805f9b34fb",
-  batteryService: "0000180f-0000-1000-8000-00805f9b34fb",
-  batteryChar: "00002a19-0000-1000-8000-00805f9b34fb",
-};
-
-function crc32(data: Uint8Array): number {
-  let c = ~0;
-  for (let i = 0; i < data.length; i++) {
-    c ^= data[i]!;
-    for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1;
-  }
-  return ~c >>> 0;
-}
-
-function crc16Modbus(data: Uint8Array): number {
-  let crc = 0xffff;
-  for (let i = 0; i < data.length; i++) {
-    crc ^= data[i]!;
-    for (let b = 0; b < 8; b++) crc = crc & 1 ? (crc >>> 1) ^ 0xa001 : crc >>> 1;
-  }
-  return crc & 0xffff;
-}
-
-function buildWhoop5Frame(pktType: number, seq: number, cmd: number, payload: Uint8Array): ArrayBuffer {
-  const record = new Uint8Array(3 + payload.length);
-  record[0] = pktType;
-  record[1] = seq;
-  record[2] = cmd;
-  record.set(payload, 3);
-  const inner = new Uint8Array(record.length + 4);
-  inner.set(record);
-  new DataView(inner.buffer).setUint32(record.length, crc32(record), true);
-  const head = new Uint8Array(6);
-  head[0] = 0xaa;
-  head[1] = 0x01;
-  new DataView(head.buffer).setUint16(2, inner.length, true);
-  head[4] = 0x00;
-  head[5] = 0x01;
-  const out = new Uint8Array(8 + inner.length);
-  out.set(head);
-  new DataView(out.buffer).setUint16(6, crc16Modbus(head), true);
-  out.set(inner, 8);
-  return out.buffer;
-}
+import { CMD, UUID } from "../lib/whoop";
+import { createHistorySync, type SyncProgress } from "../lib/whoopSync";
 
 function parseHrPacket(data: DataView): { bpm: number; rrMs: number[] } | null {
   if (data.byteLength < 2) return null;
@@ -108,8 +61,12 @@ export default function Home() {
   const [profile, setProfile] = useState<Profile>({ age: 30, sex: "u" });
   const [showSettings, setShowSettings] = useState(false);
   const [tick, setTick] = useState(0);
+  const [syncInfo, setSyncInfo] = useState("");
+  const [syncing, setSyncing] = useState(false);
 
   const deviceRef = useRef<BluetoothDevice | null>(null);
+  const cmdCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
   const path = useSparkPath(hrSpark, 140, 40);
 
   const recompute = useCallback(() => {
@@ -184,12 +141,16 @@ export default function Home() {
       /* ignore */
     }
     deviceRef.current = null;
+    cmdCharRef.current = null;
+    syncRef.current = null;
     setStatus("idle");
     setDeviceName("");
+    setSyncing(false);
   }, []);
 
   const connect = useCallback(async () => {
     setError("");
+    setSyncInfo("");
     if (!("bluetooth" in navigator)) {
       setError(
         iosHint
@@ -207,16 +168,67 @@ export default function Home() {
       });
       deviceRef.current = device;
       setDeviceName(device.name || "WHOOP");
-      device.addEventListener("gattserverdisconnected", () => setStatus("idle"));
+      device.addEventListener("gattserverdisconnected", () => {
+        setStatus("idle");
+        setSyncing(false);
+      });
       const server = await device.gatt!.connect();
+
+      const writeCmd = async (buf: Uint8Array, withResponse = false) => {
+        const ch = cmdCharRef.current;
+        if (!ch) throw new Error("Brak FD4B0002");
+        if (withResponse) await ch.writeValue(buf);
+        else {
+          try {
+            await ch.writeValueWithoutResponse(buf);
+          } catch {
+            await ch.writeValue(buf);
+          }
+        }
+      };
+
+      const sync = createHistorySync(writeCmd, (s) => {
+        appendSample(s);
+        if (s.bpm) {
+          setBpm(s.bpm);
+          setHrSpark((h) => [...h.slice(-80), s.bpm]);
+        }
+      });
+      sync.subscribe((p: SyncProgress) => {
+        setSyncInfo(p.error ? p.error : p.status);
+        if (p.done) {
+          setSyncing(false);
+          recompute();
+        }
+      });
+      syncRef.current = sync;
+
       try {
         const custom = await server.getPrimaryService(UUID.customService);
+        const onWhoopNotify = (ev: Event) => {
+          const t = ev.target as BluetoothRemoteGATTCharacteristic;
+          if (!t.value) return;
+          const bytes = new Uint8Array(t.value.buffer, t.value.byteOffset, t.value.byteLength);
+          void sync.onNotify(bytes);
+        };
+        for (const id of [UUID.dataNotify, UUID.eventNotify, UUID.cmdNotify] as const) {
+          try {
+            const ch = await custom.getCharacteristic(id);
+            await ch.startNotifications();
+            ch.addEventListener("characteristicvaluechanged", onWhoopNotify);
+          } catch {
+            /* bond may be required */
+          }
+        }
         const cmd = await custom.getCharacteristic(UUID.cmdWrite);
-        await cmd.writeValueWithoutResponse(buildWhoop5Frame(35, 1, 145, new Uint8Array([0x01])));
+        cmdCharRef.current = cmd;
+        await writeCmd(CMD.clientHello());
+        await new Promise((r) => setTimeout(r, 300));
+        await writeCmd(CMD.realtimeHrOn());
         await new Promise((r) => setTimeout(r, 200));
-        await cmd.writeValueWithoutResponse(buildWhoop5Frame(35, 1, 3, new Uint8Array([0x01])));
+        await writeCmd(CMD.imuRawOn());
       } catch {
-        /* optional */
+        /* custom service needs bond; 2A37 may still work */
       }
       try {
         const batSvc = await server.getPrimaryService(UUID.batteryService);
@@ -234,7 +246,23 @@ export default function Home() {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
-  }, [iosHint, onHr]);
+  }, [iosHint, onHr, recompute]);
+
+  const syncHistory = useCallback(async () => {
+    if (!syncRef.current || !cmdCharRef.current) {
+      setError("Najpierw Polacz z Whoop w PulseLab (nie w nRF).");
+      return;
+    }
+    setError("");
+    setSyncing(true);
+    setSyncInfo("Start sync…");
+    try {
+      await syncRef.current.start();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSyncing(false);
+    }
+  }, []);
 
   const decodePaste = useCallback(() => {
     let n = 0;
@@ -285,17 +313,31 @@ export default function Home() {
       </header>
 
       <section className="hero-recovery">
-        <ScoreRing value={recovery.recovery} max={100} size={200} stroke={12} color={recColor}>
+        <ScoreRing
+          value={recovery.provisional ? 0 : recovery.recovery}
+          max={100}
+          size={200}
+          stroke={12}
+          color={recovery.provisional ? "#6b7280" : recColor}
+        >
           <p className="label">Recovery</p>
-          <p className="big" style={{ color: recColor }}>
-            {metrics.todayCount < 30 && recovery.provisional ? "—" : `${recovery.recovery}%`}
+          <p className="big" style={{ color: recovery.provisional ? "#9ca3af" : recColor }}>
+            {recovery.provisional ? "—" : `${recovery.recovery}%`}
           </p>
           <p className="hint">
-            {recovery.band === "green" ? "Gotowy" : recovery.band === "yellow" ? "Umiarkowanie" : "Odpoczynek"}
+            {recovery.provisional
+              ? "Czekam na noc"
+              : recovery.band === "green"
+                ? "Gotowy"
+                : recovery.band === "yellow"
+                  ? "Umiarkowanie"
+                  : "Odpoczynek"}
           </p>
         </ScoreRing>
         {recovery.provisional && (
-          <p className="provisional">Zbieram baseline (kilka nocy / godzin noszenia) — wynik prowizoryczny</p>
+          <p className="provisional">
+            Recovery liczę dopiero rano po nocy (≥5.5h snu + kilka nocy baseline). 2h noszenia to za mało.
+          </p>
         )}
       </section>
 
@@ -305,17 +347,26 @@ export default function Home() {
             <p className="label sm">Strain</p>
             <p className="mid cyan">{strain.strain.toFixed(1)}</p>
           </ScoreRing>
-          <p className="card-meta">/ 21 · {strain.minutesTracked.toFixed(0)} min</p>
+          <p className="card-meta">
+            dziś · {strain.minutesTracked.toFixed(0)} min
+            {strain.minutesTracked < 120 ? " (częściowy)" : ""}
+          </p>
         </div>
         <div className="card">
-          <ScoreRing value={sleep.performance} max={100} size={120} stroke={8} color="#5b8cff">
+          <ScoreRing
+            value={sleep.provisional ? 0 : sleep.performance}
+            max={100}
+            size={120}
+            stroke={8}
+            color="#5b8cff"
+          >
             <p className="label sm">Sleep</p>
-            <p className="mid blue">{sleep.provisional && sleep.hoursAsleep < 1 ? "—" : `${sleep.performance}%`}</p>
+            <p className="mid blue">{sleep.provisional ? "—" : `${sleep.performance}%`}</p>
           </ScoreRing>
           <p className="card-meta">
-            {sleep.hoursAsleep > 0
-              ? `${sleep.hoursAsleep.toFixed(1)}h / ${sleep.hoursNeeded.toFixed(1)}h`
-              : `need ${sleep.hoursNeeded.toFixed(1)}h`}
+            {sleep.provisional
+              ? "czekam na noc"
+              : `${sleep.hoursAsleep.toFixed(1)}h / ${sleep.hoursNeeded.toFixed(1)}h`}
           </p>
         </div>
       </section>
@@ -351,10 +402,19 @@ export default function Home() {
             {status === "connecting" ? "Lacze…" : "Polacz z Whoop"}
           </button>
         )}
+        <button
+          type="button"
+          className="secondary"
+          onClick={syncHistory}
+          disabled={status !== "live" || syncing}
+        >
+          {syncing ? "Pobieram…" : "Pobierz historie"}
+        </button>
         <button type="button" className="ghost" onClick={downloadCsv}>
           CSV
         </button>
       </section>
+      {syncInfo && <p className="provisional">{syncInfo}</p>}
 
       {!bleOk && iosHint && (
         <aside className="banner">iPhone: Bluefy do BLE, albo wklej hex z nRF ponizej.</aside>
@@ -370,9 +430,8 @@ export default function Home() {
       </section>
 
       <footer className="foot">
-        Strain: Edwards TRIMP → skala 0–21. Recovery: HRV (RMSSD) 60% + RHR 20% + Sleep 20%. Sleep:
-        czas vs potrzeba. To otwarte metody fizjologiczne — nie oficjalny algorytm Whoop.
-        Bateria BLE ± ok. 2–5%.
+        IMU = akcelerometr (ruch) — zostaw włączony, gdy zbierasz dane. „Pobierz historie” ściąga z
+        opaski HR+RR+accel+temp (1 Hz). Sleep score i tak dopiero po prawdziwej nocy.
       </footer>
 
       {showSettings && (
