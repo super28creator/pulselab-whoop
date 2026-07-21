@@ -5,9 +5,18 @@ export type Sex = "m" | "f" | "u";
 export type Profile = {
   age: number;
   sex: Sex;
+  weightKg?: number;
+  heightCm?: number;
   /** Override Tanaka if known */
   maxHr?: number;
   restingHrHint?: number;
+};
+
+export const DEFAULT_PROFILE: Profile = {
+  age: 19,
+  sex: "m",
+  weightKg: 80,
+  heightCm: 190,
 };
 
 export type HrSample = {

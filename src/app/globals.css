@@ -238,8 +238,60 @@ body { min-height: 100dvh; }
 .chart-modal-head { display: flex; justify-content: space-between; align-items: flex-start; }
 .chart-modal-head h2 { margin: 0; font-size: 1.05rem; }
 .chart-hint { color: var(--muted); font-size: 0.7rem; margin: 0.25rem 0 0.5rem; }
-.chart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 0.75rem; }
-.chart-scroll .daychart-svg { width: 1100px; }
+.chart-full { width: 100%; border-radius: 0.75rem; overflow: hidden; }
+.chart-full .daychart-svg { width: 100%; height: auto; display: block; }
+
+/* live workout banner */
+.live-workout, .act-live {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  background: linear-gradient(90deg, rgba(22,236,146,0.12), rgba(0,240,255,0.08));
+  border: 1px solid rgba(22,236,146,0.4);
+  border-radius: 1rem;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.85rem;
+}
+.live-workout-label, .act-live-label {
+  margin: 0;
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.live-workout-name, .act-live-name {
+  margin: 0.15rem 0 0;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.act-live-timer {
+  margin: 0.2rem 0 0;
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: var(--green);
+}
+.stop-btn {
+  flex: 0 0 auto;
+  padding: 0.7rem 1.1rem !important;
+  white-space: nowrap;
+}
+
+.act-log-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+}
 
 /* actions */
 .actions { display: grid; grid-template-columns: 1.6fr 0.8fr; gap: 0.6rem; margin-top: 0.25rem; }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { sportById } from "../lib/sports";
 import type { Activity } from "../lib/store";
 
@@ -11,12 +11,10 @@ type Props = {
   unit?: string;
   color: string;
   points: ChartPoint[];
-  /** Local day start (ms, midnight). Used to map time-of-day → x. */
   dayStart: number;
   yMin?: number;
   yMax?: number;
   activities?: Activity[];
-  /** big number shown in the mini header */
   headline?: string;
 };
 
@@ -72,7 +70,13 @@ function ChartSvg({
   const gid = `grad-${id}`;
 
   return (
-    <svg width={w} height={h + (showHours ? 16 : 0)} className="daychart-svg">
+    <svg
+      viewBox={`0 0 ${w} ${h + (showHours ? 18 : 0)}`}
+      preserveAspectRatio="none"
+      className="daychart-svg"
+      width="100%"
+      height={h + (showHours ? 18 : 0)}
+    >
       <defs>
         <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.35" />
@@ -82,7 +86,7 @@ function ChartSvg({
 
       {activities?.map((a) => {
         const x1 = ((a.start - dayStart) / DAY_MS) * w;
-        const x2 = ((a.end - dayStart) / DAY_MS) * w;
+        const x2 = ((Math.min(a.end, dayStart + DAY_MS) - dayStart) / DAY_MS) * w;
         const bw = Math.max(2, x2 - x1);
         return (
           <g key={a.id}>
@@ -106,7 +110,7 @@ function ChartSvg({
           return (
             <g key={hr}>
               <line x1={x} y1={0} x2={x} y2={h} stroke="rgba(255,255,255,0.06)" />
-              <text x={Math.min(w - 14, x + 2)} y={h + 12} fontSize="10" fill="#9aa">
+              <text x={Math.min(w - 18, Math.max(0, x + 2))} y={h + 14} fontSize="10" fill="#9aa">
                 {hr}:00
               </text>
             </g>
@@ -128,9 +132,21 @@ export function DayChart({
   headline,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const [wide, setWide] = useState(340);
   const lo = yMin ?? (points.length ? Math.min(...points.map((p) => p.v)) - 2 : 0);
   const hi = yMax ?? (points.length ? Math.max(...points.map((p) => p.v)) + 2 : 10);
   const empty = points.length < 2;
+
+  useEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const el = document.querySelector(".chart-full");
+      if (el) setWide(Math.max(280, el.clientWidth));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open]);
 
   return (
     <>
@@ -142,7 +158,11 @@ export function DayChart({
       >
         <div className="daychart-head">
           <span className="daychart-title">{title}</span>
-          {headline && <span className="daychart-headline" style={{ color }}>{headline}</span>}
+          {headline && (
+            <span className="daychart-headline" style={{ color }}>
+              {headline}
+            </span>
+          )}
         </div>
         {empty ? (
           <div className="daychart-empty">Brak danych — noś opaskę / połącz</div>
@@ -176,15 +196,15 @@ export function DayChart({
                 ✕
               </button>
             </div>
-            <p className="chart-hint">Przewiń w bok →</p>
-            <div className="chart-scroll">
+            <p className="chart-hint">Cały dzień · 0:00–24:00</p>
+            <div className="chart-full">
               <ChartSvg
                 id={`big-${title}`}
                 points={points}
                 color={color}
                 dayStart={dayStart}
-                w={1100}
-                h={240}
+                w={wide}
+                h={220}
                 yMin={lo}
                 yMax={hi}
                 activities={activities}

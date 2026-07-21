@@ -1,7 +1,7 @@
 /** Local persistence: HR samples, profile, baselines, activities, favorites, day summaries. */
 
 import { Baseline, emptyBaseline } from "./metrics/recovery";
-import { HrSample, Profile, localDateKey } from "./metrics/types";
+import { DEFAULT_PROFILE, HrSample, Profile, localDateKey } from "./metrics/types";
 
 const PROFILE_KEY = "pulselab.profile";
 const BASELINE_KEY = "pulselab.baseline";
@@ -9,17 +9,18 @@ const SAMPLES_KEY = "pulselab.samples.v1";
 const ACTIVITIES_KEY = "pulselab.activities.v1";
 const FAVSPORTS_KEY = "pulselab.favsports.v1";
 const SUMMARY_KEY = "pulselab.summaries.v1";
+const ACTIVE_KEY = "pulselab.active.v1";
 
 const MAX_SAMPLE_DAYS = 8;
 
 export function loadProfile(): Profile {
-  if (typeof window === "undefined") return { age: 30, sex: "u" };
+  if (typeof window === "undefined") return { ...DEFAULT_PROFILE };
   try {
     const raw = localStorage.getItem(PROFILE_KEY);
-    if (!raw) return { age: 30, sex: "u" };
-    return { age: 30, sex: "u", ...JSON.parse(raw) };
+    if (!raw) return { ...DEFAULT_PROFILE };
+    return { ...DEFAULT_PROFILE, ...JSON.parse(raw) };
   } catch {
-    return { age: 30, sex: "u" };
+    return { ...DEFAULT_PROFILE };
   }
 }
 
@@ -124,6 +125,12 @@ export type Activity = {
   note?: string;
 };
 
+/** Live session — started but not yet stopped. */
+export type ActiveSession = {
+  sport: string;
+  start: number;
+};
+
 type ActivityStore = Record<string, Activity[]>;
 
 function readActivities(): ActivityStore {
@@ -149,6 +156,12 @@ export function addActivity(a: Omit<Activity, "id">): Activity {
   return activity;
 }
 
+export function updateActivity(dateKey: string, id: string, patch: Partial<Activity>): void {
+  const all = readActivities();
+  all[dateKey] = (all[dateKey] ?? []).map((a) => (a.id === id ? { ...a, ...patch } : a));
+  writeActivities(all);
+}
+
 export function removeActivity(dateKey: string, id: string): void {
   const all = readActivities();
   all[dateKey] = (all[dateKey] ?? []).filter((a) => a.id !== id);
@@ -157,6 +170,38 @@ export function removeActivity(dateKey: string, id: string): void {
 
 export function loadActivities(date = localDateKey()): Activity[] {
   return readActivities()[date] ?? [];
+}
+
+export function loadActiveSession(): ActiveSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(ACTIVE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function startActiveSession(sport: string): ActiveSession {
+  const session: ActiveSession = { sport, start: Date.now() };
+  localStorage.setItem(ACTIVE_KEY, JSON.stringify(session));
+  return session;
+}
+
+export function stopActiveSession(): Activity | null {
+  const session = loadActiveSession();
+  if (!session) return null;
+  localStorage.removeItem(ACTIVE_KEY);
+  return addActivity({
+    sport: session.sport,
+    start: session.start,
+    end: Date.now(),
+    manual: false,
+  });
+}
+
+export function clearActiveSession(): void {
+  localStorage.removeItem(ACTIVE_KEY);
 }
 
 /* ---------------- Favorite sports ---------------- */

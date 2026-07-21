@@ -9,9 +9,10 @@ import { computeRecovery, emptyBaseline, updateBaseline } from "../lib/metrics/r
 import { estimateRestingHr, computeSleepPerformance } from "../lib/metrics/sleep";
 import { computeStrain } from "../lib/metrics/strain";
 import { stressSeries, averageStress, hrSeries } from "../lib/metrics/stress";
-import { Profile, HrSample, localDateKey } from "../lib/metrics/types";
+import { Profile, HrSample, localDateKey, DEFAULT_PROFILE } from "../lib/metrics/types";
 import {
   appendSample,
+  loadActiveSession,
   loadActivities,
   loadBaseline,
   loadDaySamples,
@@ -20,9 +21,12 @@ import {
   saveBaseline,
   saveDaySummary,
   saveProfile,
+  stopActiveSession,
+  type ActiveSession,
 } from "../lib/store";
 import { CMD, UUID } from "../lib/whoop";
 import { createHistorySync, type SyncProgress } from "../lib/whoopSync";
+import { sportById } from "../lib/sports";
 
 type Tab = "today" | "calendar" | "activities";
 
@@ -65,11 +69,13 @@ export default function Home() {
   const [error, setError] = useState("");
   const [bleOk, setBleOk] = useState(false);
   const [iosHint, setIosHint] = useState(false);
-  const [profile, setProfile] = useState<Profile>({ age: 30, sex: "u" });
+  const [profile, setProfile] = useState<Profile>({ ...DEFAULT_PROFILE });
   const [showSettings, setShowSettings] = useState(false);
   const [tick, setTick] = useState(0);
   const [syncInfo, setSyncInfo] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [active, setActive] = useState<ActiveSession | null>(null);
+  const [nowTick, setNowTick] = useState(Date.now());
 
   const deviceRef = useRef<BluetoothDevice | null>(null);
   const cmdCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
@@ -83,7 +89,14 @@ export default function Home() {
     setBleOk(typeof navigator !== "undefined" && "bluetooth" in navigator);
     setIosHint(/iPhone|iPad|iPod/i.test(navigator.userAgent));
     setProfile(loadProfile());
+    setActive(loadActiveSession());
   }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
 
   const metrics = useMemo(() => {
     const daySamples = loadDaySamples(selectedDate);
@@ -299,12 +312,39 @@ export default function Home() {
   const { strain, sleep, recovery } = metrics;
   const recColor = recoveryColor(recovery.band);
   const dayStart = dayStartMs(selectedDate);
-  const activities = useMemo(() => loadActivities(selectedDate), [selectedDate, tick]);
+  const activities = useMemo(() => {
+    const list = loadActivities(selectedDate);
+    // Show live session on charts as open-ended until stop
+    if (active && isToday) {
+      list.push({
+        id: "live",
+        sport: active.sport,
+        start: active.start,
+        end: nowTick,
+        manual: false,
+      });
+    }
+    return list;
+  }, [selectedDate, tick, active, isToday, nowTick]);
   const prettyDate = new Date(dayStart).toLocaleDateString("pl-PL", {
     weekday: "long",
     day: "numeric",
     month: "long",
   });
+
+  const liveElapsed = (() => {
+    if (!active) return "";
+    const s = Math.max(0, Math.floor((nowTick - active.start) / 1000));
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  })();
+
+  const endLive = () => {
+    stopActiveSession();
+    setActive(null);
+    recompute();
+  };
 
   return (
     <div className="app">
@@ -334,6 +374,20 @@ export default function Home() {
               <span>{prettyDate}</span>
               <button type="button" onClick={() => setSelectedDate(localDateKey())}>
                 Wróć do dziś
+              </button>
+            </div>
+          )}
+
+          {active && isToday && (
+            <div className="live-workout">
+              <div>
+                <p className="live-workout-label">Aktywność w toku</p>
+                <p className="live-workout-name">
+                  {sportById(active.sport).emoji} {sportById(active.sport).name} · {liveElapsed}
+                </p>
+              </div>
+              <button type="button" className="primary stop-btn" onClick={endLive}>
+                Zakończ
               </button>
             </div>
           )}
@@ -485,7 +539,13 @@ export default function Home() {
       )}
 
       {tab === "activities" && (
-        <ActivitiesView selectedDate={selectedDate} onChange={recompute} />
+        <ActivitiesView
+          selectedDate={selectedDate}
+          onChange={() => {
+            setActive(loadActiveSession());
+            recompute();
+          }}
+        />
       )}
 
       <nav className="bottom-nav">
@@ -523,8 +583,34 @@ export default function Home() {
               Wiek
               <input
                 type="number"
+                min={10}
+                max={90}
                 value={profile.age}
-                onChange={(e) => setProfile({ ...profile, age: Number(e.target.value) || 30 })}
+                onChange={(e) => setProfile({ ...profile, age: Number(e.target.value) || 19 })}
+              />
+            </label>
+            <label>
+              Waga (kg)
+              <input
+                type="number"
+                min={30}
+                max={200}
+                value={profile.weightKg ?? 80}
+                onChange={(e) =>
+                  setProfile({ ...profile, weightKg: Number(e.target.value) || undefined })
+                }
+              />
+            </label>
+            <label>
+              Wzrost (cm)
+              <input
+                type="number"
+                min={120}
+                max={230}
+                value={profile.heightCm ?? 190}
+                onChange={(e) =>
+                  setProfile({ ...profile, heightCm: Number(e.target.value) || undefined })
+                }
               />
             </label>
             <label>
