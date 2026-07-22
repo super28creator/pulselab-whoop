@@ -13,22 +13,29 @@ import {
 } from "./store";
 import { localDateKey, type HrSample } from "./metrics/types";
 
+const OWNER_KEY = "pulselab.cloud.owner";
+
 export type CloudBootResult = {
   ok: boolean;
   samples: number;
   error?: string;
 };
 
-async function ensureUserId(): Promise<string | null> {
-  const sb = getSupabase();
-  if (!sb) return null;
-
-  const { data: sessionData } = await sb.auth.getSession();
-  if (sessionData.session?.user?.id) return sessionData.session.user.id;
-
-  const { data, error } = await sb.auth.signInAnonymously();
-  if (error) throw error;
-  return data.user?.id ?? null;
+function getOwnerKey(): string {
+  if (typeof window === "undefined") return "server";
+  try {
+    let k = localStorage.getItem(OWNER_KEY);
+    if (!k) {
+      k =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `pl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(OWNER_KEY, k);
+    }
+    return k;
+  } catch {
+    return "local-fallback";
+  }
 }
 
 export async function pullCloudHistory(days = 8): Promise<CloudBootResult> {
@@ -37,14 +44,12 @@ export async function pullCloudHistory(days = 8): Promise<CloudBootResult> {
   }
   try {
     const sb = getSupabase()!;
-    const userId = await ensureUserId();
-    if (!userId) return { ok: false, samples: 0, error: "Brak sesji" };
+    const owner = getOwnerKey();
 
-    // Meta cursor
     const { data: meta } = await sb
       .from("pulselab_meta")
       .select("sync_cursor")
-      .eq("user_id", userId)
+      .eq("owner_key", owner)
       .maybeSingle();
     if (meta?.sync_cursor) saveSyncCursor(Number(meta.sync_cursor));
 
@@ -52,7 +57,7 @@ export async function pullCloudHistory(days = 8): Promise<CloudBootResult> {
     const { data, error } = await sb
       .from("hr_samples")
       .select("t,bpm,rr_ms,date_key")
-      .eq("user_id", userId)
+      .eq("owner_key", owner)
       .gte("t", since)
       .order("t", { ascending: true })
       .limit(50_000);
@@ -76,11 +81,10 @@ export async function pullCloudHistory(days = 8): Promise<CloudBootResult> {
       endBulkWrite();
     }
 
-    // Day summaries (calendar)
     const { data: sums } = await sb
       .from("day_summaries")
       .select("date_key,payload")
-      .eq("user_id", userId)
+      .eq("owner_key", owner)
       .order("date_key", { ascending: false })
       .limit(40);
     if (sums?.length) {
@@ -105,11 +109,10 @@ export async function pushLocalHistoryToCloud(): Promise<{ pushed: number; error
   if (!isSupabaseConfigured()) return { pushed: 0, error: "Brak Supabase" };
   try {
     const sb = getSupabase()!;
-    const userId = await ensureUserId();
-    if (!userId) return { pushed: 0, error: "Brak sesji" };
+    const owner = getOwnerKey();
 
     const rows: Array<{
-      user_id: string;
+      owner_key: string;
       t: number;
       bpm: number;
       date_key: string;
@@ -122,7 +125,7 @@ export async function pushLocalHistoryToCloud(): Promise<{ pushed: number; error
       const key = localDateKey(d.getTime());
       for (const s of loadDaySamples(key)) {
         rows.push({
-          user_id: userId,
+          owner_key: owner,
           t: s.t,
           bpm: s.bpm,
           date_key: key,
@@ -135,19 +138,17 @@ export async function pushLocalHistoryToCloud(): Promise<{ pushed: number; error
     const chunk = 400;
     for (let i = 0; i < rows.length; i += chunk) {
       const part = rows.slice(i, i + chunk);
-      const { error } = await sb.from("hr_samples").upsert(part, { onConflict: "user_id,t" });
+      const { error } = await sb.from("hr_samples").upsert(part, { onConflict: "owner_key,t" });
       if (error) throw error;
       pushed += part.length;
     }
 
     const cursor = loadSyncCursor();
-    if (cursor > 0) {
-      await sb.from("pulselab_meta").upsert({
-        user_id: userId,
-        sync_cursor: cursor,
-        updated_at: new Date().toISOString(),
-      });
-    }
+    await sb.from("pulselab_meta").upsert({
+      owner_key: owner,
+      sync_cursor: cursor > 0 ? cursor : 0,
+      updated_at: new Date().toISOString(),
+    });
 
     return { pushed };
   } catch (e) {
@@ -159,10 +160,9 @@ export async function pushDaySummaryToCloud(summary: DaySummary): Promise<void> 
   if (!isSupabaseConfigured()) return;
   try {
     const sb = getSupabase()!;
-    const userId = await ensureUserId();
-    if (!userId) return;
+    const owner = getOwnerKey();
     await sb.from("day_summaries").upsert({
-      user_id: userId,
+      owner_key: owner,
       date_key: summary.date,
       payload: summary,
       updated_at: new Date().toISOString(),
