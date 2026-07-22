@@ -11,3 +11,10 @@ data_log.csv
 *.decoded.csv
 .DS_Store
 .vercel_mcp_args.json
+
+# Capacitor / Xcode local junk (commit the ios/ project itself)
+ios/App/Pods/
+ios/App/DerivedData/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/

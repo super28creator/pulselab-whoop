@@ -28,10 +28,17 @@ import {
   stopActiveSession,
   type ActiveSession,
 } from "../lib/store";
-import { CMD, UUID } from "../lib/whoop";
+import { CMD } from "../lib/whoop";
 import { createHistorySync, type SyncProgress } from "../lib/whoopSync";
 import { sportById } from "../lib/sports";
 import { batteryFrom2a19, batteryFromWhoopFrame } from "../lib/battery";
+import {
+  connectWhoop,
+  isBleAvailable,
+  isIosBrowserWithoutBle,
+  isNativeApp,
+  type WhoopSession,
+} from "../lib/ble";
 import {
   beginGpsIfNeeded,
   endGps,
@@ -95,7 +102,8 @@ export default function Home() {
   const [hrSpark, setHrSpark] = useState<number[]>([]);
   const [error, setError] = useState("");
   const [bleOk, setBleOk] = useState(false);
-  const [iosHint, setIosHint] = useState(false);
+  const [iosBrowserHint, setIosBrowserHint] = useState(false);
+  const [nativeApp, setNativeApp] = useState(false);
   const [profile, setProfile] = useState<Profile>({ ...DEFAULT_PROFILE });
   const [showSettings, setShowSettings] = useState(false);
   const [tick, setTick] = useState(0);
@@ -108,9 +116,7 @@ export default function Home() {
   const [nowTick, setNowTick] = useState(Date.now());
   const [gps, setGps] = useState<GpsTrack>({ points: [], distanceM: 0 });
 
-  const deviceRef = useRef<BluetoothDevice | null>(null);
-  const cmdCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
-  const batCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const sessionRef = useRef<WhoopSession | null>(null);
   const batteryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const syncRef = useRef<ReturnType<typeof createHistorySync> | null>(null);
   const lastRecomputeRef = useRef(0);
@@ -124,8 +130,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setBleOk(typeof navigator !== "undefined" && "bluetooth" in navigator);
-    setIosHint(/iPhone|iPad|iPod/i.test(navigator.userAgent));
+    setNativeApp(isNativeApp());
+    setIosBrowserHint(isIosBrowserWithoutBle());
+    void isBleAvailable().then(setBleOk);
     setProfile(loadProfile());
     const s = loadActiveSession();
     setActive(s);
@@ -138,6 +145,17 @@ export default function Home() {
       window.setTimeout(() => document.getElementById("boot-splash")?.remove(), 400);
     };
     requestAnimationFrame(() => requestAnimationFrame(hide));
+
+    // Native shell polish
+    if (isNativeApp()) {
+      void import("@capacitor/status-bar").then(({ StatusBar, Style }) => {
+        void StatusBar.setStyle({ style: Style.Dark });
+        void StatusBar.setBackgroundColor({ color: "#050506" });
+      });
+      void import("@capacitor/splash-screen").then(({ SplashScreen }) => {
+        void SplashScreen.hide();
+      });
+    }
   }, [recompute]);
 
   useEffect(() => subscribeGps(setGps), []);
@@ -231,34 +249,18 @@ export default function Home() {
     [recompute],
   );
 
-  const onHr = useCallback(
-    (event: Event) => {
-      const target = event.target as BluetoothRemoteGATTCharacteristic;
-      if (!target.value) return;
-      const parsed = parseHrPacket(target.value);
-      if (!parsed) return;
-      ingest({ t: Date.now(), bpm: parsed.bpm, rrMs: parsed.rrMs.length ? parsed.rrMs : undefined });
-    },
-    [ingest],
-  );
-
   const clearBatteryPoll = useCallback(() => {
     if (batteryPollRef.current) {
       clearInterval(batteryPollRef.current);
       batteryPollRef.current = null;
     }
-    batCharRef.current = null;
   }, []);
 
   const disconnect = useCallback(() => {
     clearBatteryPoll();
-    try {
-      deviceRef.current?.gatt?.disconnect();
-    } catch {
-      /* ignore */
-    }
-    deviceRef.current = null;
-    cmdCharRef.current = null;
+    const s = sessionRef.current;
+    sessionRef.current = null;
+    void s?.disconnect();
     syncRef.current = null;
     autoSyncedRef.current = false;
     setStatus("idle");
@@ -269,50 +271,32 @@ export default function Home() {
   const connect = useCallback(async () => {
     setError("");
     setSyncInfo("");
-    if (!("bluetooth" in navigator)) {
-      setError(iosHint ? "Safari nie łączy BLE — użyj Bluefy." : "Potrzebny Chrome z Bluetoothem.");
+    const ok = await isBleAvailable();
+    if (!ok) {
+      setError(
+        isIosBrowserWithoutBle()
+          ? "Safari nie łączy BLE. Zainstaluj aplikację PulseLab (patrz IOS_SETUP.md) albo użyj Bluefy."
+          : "Potrzebny Chrome z Bluetoothem albo aplikacja PulseLab.",
+      );
       setStatus("error");
       return;
     }
     setStatus("connecting");
     try {
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: "WHOOP" }, { services: [UUID.hrService] }],
-        optionalServices: [UUID.customService, UUID.hrService, UUID.batteryService],
-      });
-      deviceRef.current = device;
-      setDeviceName(device.name || "WHOOP");
-      device.addEventListener("gattserverdisconnected", () => {
-        clearBatteryPoll();
-        setStatus("idle");
-        setSyncing(false);
-      });
-      const server = await device.gatt!.connect();
-
-      const writeCmd = async (buf: Uint8Array, withResponse = false) => {
-        const ch = cmdCharRef.current;
-        if (!ch) throw new Error("Brak FD4B0002");
-        const data = buf as unknown as BufferSource;
-        if (withResponse) await ch.writeValue(data);
-        else {
-          try {
-            await ch.writeValueWithoutResponse(data);
-          } catch {
-            await ch.writeValue(data);
-          }
-        }
-      };
-
       const applyBattery = (pct: number | null) => {
         if (pct == null || pct < 0 || pct > 100) return;
         setBattery(pct);
       };
 
+      // Placeholder sync — writeCmd bound after session exists
+      let writeCmd: (buf: Uint8Array, withResponse?: boolean) => Promise<void> = async () => {
+        throw new Error("BLE jeszcze nie gotowe");
+      };
+
       const sync = createHistorySync(
-        writeCmd,
+        (buf, withResponse) => writeCmd(buf, withResponse),
         (s) => {
           appendSample(s, { history: syncingRef.current });
-          // Don't thrash React during bulk history download
           if (!syncingRef.current && s.bpm) {
             setBpm(s.bpm);
             setHrSpark((h) => [...h.slice(-80), s.bpm]);
@@ -344,29 +328,37 @@ export default function Home() {
       });
       syncRef.current = sync;
 
-      try {
-        const custom = await server.getPrimaryService(UUID.customService);
-        const onWhoopNotify = (ev: Event) => {
-          const t = ev.target as BluetoothRemoteGATTCharacteristic;
-          if (!t.value) return;
-          const bytes = new Uint8Array(t.value.buffer, t.value.byteOffset, t.value.byteLength);
+      const session = await connectWhoop({
+        onHr: (value) => {
+          const parsed = parseHrPacket(value);
+          if (!parsed) return;
+          ingest({
+            t: Date.now(),
+            bpm: parsed.bpm,
+            rrMs: parsed.rrMs.length ? parsed.rrMs : undefined,
+          });
+        },
+        onWhoopNotify: (bytes) => {
           const bat = batteryFromWhoopFrame(bytes);
           if (bat != null) applyBattery(bat);
           void sync.onNotify(bytes);
-        };
-        for (const id of [UUID.dataNotify, UUID.eventNotify, UUID.cmdNotify] as const) {
-          try {
-            const ch = await custom.getCharacteristic(id);
-            await ch.startNotifications();
-            ch.addEventListener("characteristicvaluechanged", onWhoopNotify);
-          } catch {
-            /* bond may be required */
-          }
-        }
-        const cmd = await custom.getCharacteristic(UUID.cmdWrite);
-        cmdCharRef.current = cmd;
+        },
+        onBattery: applyBattery,
+        onDisconnected: () => {
+          clearBatteryPoll();
+          sessionRef.current = null;
+          setStatus("idle");
+          setSyncing(false);
+        },
+      });
+
+      sessionRef.current = session;
+      writeCmd = session.writeCmd;
+      setDeviceName(session.deviceName);
+
+      try {
         await writeCmd(CMD.clientHello());
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 200));
         await writeCmd(CMD.realtimeHrOn());
         try {
           await writeCmd(CMD.getBattery());
@@ -374,52 +366,29 @@ export default function Home() {
           /* optional */
         }
       } catch {
-        /* custom service needs bond; 2A37 may still work */
+        /* custom cmds may fail without bond — HR may still work */
       }
 
-      // Battery: notify + poll (Whoop 2A19 often only updates on read)
       clearBatteryPoll();
-      try {
-        const batSvc = await server.getPrimaryService(UUID.batteryService);
-        const batChar = await batSvc.getCharacteristic(UUID.batteryChar);
-        batCharRef.current = batChar;
-        applyBattery(batteryFrom2a19(await batChar.readValue()));
-        try {
-          await batChar.startNotifications();
-          batChar.addEventListener("characteristicvaluechanged", (ev) => {
-            const t = ev.target as BluetoothRemoteGATTCharacteristic;
-            if (t.value) applyBattery(batteryFrom2a19(t.value));
-          });
-        } catch {
-          /* some stacks don't notify 2A19 */
-        }
-        batteryPollRef.current = setInterval(() => {
-          void (async () => {
-            try {
-              const ch = batCharRef.current;
-              if (ch) applyBattery(batteryFrom2a19(await ch.readValue()));
-            } catch {
-              /* disconnected */
-            }
-            try {
-              if (cmdCharRef.current) await writeCmd(CMD.getBattery());
-            } catch {
-              /* optional */
-            }
-          })();
-        }, 30_000);
-      } catch {
-        /* optional */
-      }
+      batteryPollRef.current = setInterval(() => {
+        void (async () => {
+          try {
+            const dv = await sessionRef.current?.readBattery();
+            if (dv) applyBattery(batteryFrom2a19(dv));
+          } catch {
+            /* disconnected */
+          }
+          try {
+            await sessionRef.current?.writeCmd(CMD.getBattery());
+          } catch {
+            /* optional */
+          }
+        })();
+      }, 30_000);
 
-      const hrSvc = await server.getPrimaryService(UUID.hrService);
-      const hrChar = await hrSvc.getCharacteristic(UUID.hrChar);
-      await hrChar.startNotifications();
-      hrChar.addEventListener("characteristicvaluechanged", onHr);
       setStatus("live");
 
-      // Auto history sync once per connection — no manual button needed
-      if (cmdCharRef.current && syncRef.current && !autoSyncedRef.current) {
+      if (syncRef.current && !autoSyncedRef.current) {
         autoSyncedRef.current = true;
         syncingRef.current = true;
         setSyncing(true);
@@ -444,7 +413,7 @@ export default function Home() {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
-  }, [iosHint, onHr, recompute, clearBatteryPoll]);
+  }, [ingest, recompute, clearBatteryPoll]);
 
   const saveProf = () => {
     saveProfile(profile);
@@ -689,8 +658,14 @@ export default function Home() {
             <p className="provisional">{syncInfo || "Synchronizuję dane z opaski…"}</p>
           )}
           {error && <p className="err">{error}</p>}
-          {!bleOk && iosHint && (
-            <aside className="banner">iPhone: użyj przeglądarki Bluefy do połączenia BLE.</aside>
+          {!bleOk && iosBrowserHint && !nativeApp && (
+            <aside className="banner">
+              iPhone w Safari nie ma Bluetooth. Zainstaluj apkę PulseLab (instrukcja w IOS_SETUP.md)
+              albo tymczasowo użyj Bluefy.
+            </aside>
+          )}
+          {nativeApp && (
+            <aside className="banner ok">Aplikacja natywna — Bluetooth działa bez przeglądarki.</aside>
           )}
         </>
       )}

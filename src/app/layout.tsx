@@ -20,6 +20,15 @@ export const metadata: Metadata = {
   title: "PulseLab — Whoop 5",
   description: "Recovery, Strain, Sleep — lokalnie z Twojej opaski",
   manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "PulseLab",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    apple: "/apple-touch-icon.png",
+    icon: "/icons/icon-1024.png",
+  },
 };
 
 export const viewport: Viewport = {
