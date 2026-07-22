@@ -48,6 +48,8 @@ import {
   subscribeGps,
   type GpsTrack,
 } from "../lib/gps";
+import { isSupabaseConfigured } from "../lib/supabase";
+import { pullCloudHistory, pushDaySummaryToCloud, pushLocalHistoryToCloud } from "../lib/cloudSync";
 
 const CalendarView = dynamic(
   () => import("../components/CalendarView").then((m) => ({ default: m.CalendarView })),
@@ -137,16 +139,29 @@ export default function Home() {
     const s = loadActiveSession();
     setActive(s);
     if (s && sportNeedsGps(s.sport)) beginGpsIfNeeded(s.sport);
-    // Warm sample cache + first metrics paint, then hide HTML splash
-    void loadDaySamples();
-    recompute();
+
+    const splashSub = document.querySelector("#boot-splash .bs-sub");
     const hide = () => {
       document.getElementById("boot-splash")?.classList.add("gone");
       window.setTimeout(() => document.getElementById("boot-splash")?.remove(), 400);
     };
-    requestAnimationFrame(() => requestAnimationFrame(hide));
 
-    // Native shell polish
+    void (async () => {
+      void loadDaySamples();
+      if (isSupabaseConfigured()) {
+        if (splashSub) splashSub.textContent = "Ładuję historię z chmury…";
+        const cloud = await pullCloudHistory(8);
+        if (cloud.ok && cloud.samples > 0) {
+          recompute();
+          if (splashSub) splashSub.textContent = `Chmura · ${cloud.samples} punktów`;
+        } else if (cloud.error && splashSub) {
+          splashSub.textContent = "Offline / lokalne dane…";
+        }
+      }
+      recompute();
+      requestAnimationFrame(() => requestAnimationFrame(hide));
+    })();
+
     if (isNativeApp()) {
       void import("@capacitor/status-bar").then(({ StatusBar, Style }) => {
         void StatusBar.setStyle({ style: Style.Dark });
@@ -208,7 +223,7 @@ export default function Home() {
   useEffect(() => {
     if (metrics.count < 5) return;
     const hrVals = metrics.hr.map((p) => p.bpm);
-    saveDaySummary({
+    const summary = {
       date: selectedDate,
       recovery: metrics.recovery.provisional ? null : metrics.recovery.recovery,
       strain: metrics.strain.strain,
@@ -219,7 +234,9 @@ export default function Home() {
       hrAvg: hrVals.length ? Math.round(hrVals.reduce((a, b) => a + b, 0) / hrVals.length) : 0,
       hrMin: hrVals.length ? Math.min(...hrVals) : 0,
       hrMax: hrVals.length ? Math.max(...hrVals) : 0,
-    });
+    };
+    saveDaySummary(summary);
+    void pushDaySummaryToCloud(summary);
     // only when day / key metrics change — not every bpm
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, metrics.count, metrics.strain.strain, metrics.recovery.recovery, metrics.sleep.performance]);
@@ -399,8 +416,15 @@ export default function Home() {
         beginBulkWrite();
         void syncRef.current
           .start()
-          .then((res) => {
+          .then(async (res) => {
             if (res?.newestTs) saveSyncCursor(res.newestTs);
+            // Upload to Supabase so next open is instant
+            if (isSupabaseConfigured()) {
+              setSyncStatus("Zapisuję do chmury…");
+              const up = await pushLocalHistoryToCloud();
+              if (up.error) setSyncInfo(`Chmura: ${up.error}`);
+              else if (up.pushed > 0) setSyncInfo(`Chmura OK · ${up.pushed} punktów`);
+            }
           })
           .catch((e) => {
             syncingRef.current = false;
